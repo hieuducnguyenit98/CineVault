@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="vi" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>CineVault — Rạp Phim Cá Nhân</title>
+    <meta name="description" content="Không gian xem phim riêng tư sang trọng với lưu lịch sử xem, gợi ý theo sở thích cá nhân, chế độ tối và đồng bộ dữ liệu đa nền tảng." />
+    <meta property="og:title" content="CineVault — Rạp Phim Cá Nhân" />
+    <meta property="og:description" content="Không gian xem phim riêng tư sang trọng với lưu lịch sử xem, gợi ý theo sở thích cá nhân, chế độ tối và đồng bộ dữ liệu đa nền tảng." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,600&display=swap" rel="stylesheet" />
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem('cinevault_user_state_v1');
+          if (raw) {
+            var parsed = JSON.parse(raw);
+            if (parsed && parsed.theme === 'light') {
+              document.documentElement.classList.remove('dark');
+            } else {
+              document.documentElement.classList.add('dark');
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-[#F5F3EE] text-zinc-900 dark:bg-[#070709] dark:text-zinc-100 antialiased selection:bg-[#D4AF37]/30 selection:text-[#D4AF37]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

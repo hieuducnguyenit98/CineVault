@@ -1,0 +1,6 @@
+{
+  "name": "CineVault — Rạp Phim Cá Nhân",
+  "description": "Không gian xem phim riêng tư sang trọng với lưu lịch sử xem, gợi ý theo sở thích cá nhân, chế độ tối và đồng bộ dữ liệu đa nền tảng.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
