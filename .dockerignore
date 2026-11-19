@@ -1,0 +1,9 @@
+node_modules
+dist
+build
+.git
+.data
+.playwright-cli
+.env
+.env.local
+*.log
