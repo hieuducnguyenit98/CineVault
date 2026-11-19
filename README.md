@@ -57,7 +57,7 @@ git push -u origin main
    - **Name**: `cinevault` (hoặc tên tùy thích).
    - **Region**: `Singapore (Southeast Asia)` (cho tốc độ load phim nhanh nhất tại Việt Nam).
    - **Runtime**: `Node`.
-   - **Build Command**: `npm install && npm run build`
+   - **Build Command**: `npm install --legacy-peer-deps && npm run build`
    - **Start Command**: `npm start`
    - **Instance Type**: `Free`.
 5. Tại mục **Environment Variables** (Tùy chọn):
