@@ -4,9 +4,9 @@ import type {
   DailyUpdatesResponse,
   DailyUpdatesSnapshot,
   MovieSummary,
-} from '../types/movie';
-import { YT_AI_SLUG_PREFIX } from './aiShortCatalog';
-import { hasVietnameseNarration } from './movieNormalizer';
+} from '../types/movie.ts';
+import { YT_AI_SLUG_PREFIX } from './aiShortCatalog.ts';
+import { hasVietnameseNarration } from './movieNormalizer.ts';
 
 export const DAILY_AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 

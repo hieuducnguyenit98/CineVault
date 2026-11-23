@@ -5,7 +5,7 @@ import type {
   MovieGroupPart,
   MovieSummary,
   TaxonomyRef,
-} from '../types/movie';
+} from '../types/movie.ts';
 
 export type AiShortFormatFilter =
   | 'all'
