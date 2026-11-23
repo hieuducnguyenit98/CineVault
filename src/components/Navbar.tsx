@@ -1,7 +1,27 @@
-import { Compass, History, Heart, Mic, RefreshCw, Search, Sparkles, Sun, Moon } from 'lucide-react';
+import {
+  BellDot,
+  Clapperboard,
+  Compass,
+  History,
+  Heart,
+  Mic,
+  RefreshCw,
+  Search,
+  Sparkles,
+  Sun,
+  Moon,
+} from 'lucide-react';
 import type { ThemeMode } from '../types/movie';
 
-export type ActiveTab = 'explore' | 'dubbed' | 'recommendations' | 'history' | 'favorites' | 'sync';
+export type ActiveTab =
+  | 'explore'
+  | 'new-releases'
+  | 'dubbed'
+  | 'ai-short'
+  | 'recommendations'
+  | 'history'
+  | 'favorites'
+  | 'sync';
 
 interface NavbarProps {
   activeTab: ActiveTab;
@@ -9,6 +29,7 @@ interface NavbarProps {
   onFocusSearch: () => void;
   theme: ThemeMode;
   onToggleTheme: () => void;
+  newMoviesCount: number;
   historyCount: number;
   favoritesCount: number;
 }
@@ -19,12 +40,20 @@ export function Navbar({
   onFocusSearch,
   theme,
   onToggleTheme,
+  newMoviesCount,
   historyCount,
   favoritesCount,
 }: NavbarProps) {
-  const navItems: Array<{ id: ActiveTab; label: string; count?: number }> = [
+  const navItems: Array<{
+    id: ActiveTab;
+    label: string;
+    count?: number;
+    alertCount?: number;
+  }> = [
     { id: 'explore', label: 'Khám phá' },
+    { id: 'new-releases', label: 'Phim mới', alertCount: newMoviesCount },
     { id: 'dubbed', label: 'Thuyết minh' },
+    { id: 'ai-short', label: 'Phim ngắn AI' },
     { id: 'recommendations', label: 'Gợi ý' },
     { id: 'history', label: 'Lịch sử', count: historyCount },
     { id: 'favorites', label: 'Yêu thích', count: favoritesCount },
@@ -40,7 +69,7 @@ export function Navbar({
           className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#9A7418]/50 to-transparent dark:via-[#D4AF37]/60"
         />
 
-        <div className="mx-auto flex h-14 md:h-[62px] max-w-7xl items-center justify-between gap-6 px-4 sm:px-6 lg:px-8">
+        <div className="mx-auto flex h-14 md:h-[62px] max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
           {/* Zone 1: Custom Monogram + Single-line Brand Wordmark */}
           <button
             type="button"
@@ -69,31 +98,43 @@ export function Navbar({
                 />
               </svg>
             </span>
-            <span className="font-display text-[24px] font-bold tracking-tight text-zinc-950 dark:text-zinc-50 leading-none">
+            <span className="font-display text-[22px] lg:text-[24px] font-bold tracking-tight text-zinc-950 dark:text-zinc-50 leading-none">
               Cine<span className="text-[#9A7418] dark:text-[#D4AF37]">Vault</span>
             </span>
           </button>
 
-          {/* Zone 2: 5 Clean Editorial Nav Links */}
+          {/* Zone 2: 7 Clean Editorial Nav Links */}
           <nav
-            className="hidden md:flex items-center gap-1 lg:gap-2"
+            className="hidden md:flex items-center gap-0.5 lg:gap-1"
             aria-label="Điều hướng chính"
           >
             {navItems.map((item) => {
               const isActive = activeTab === item.id;
+              const hasAlert = typeof item.alertCount === 'number' && item.alertCount > 0;
               return (
                 <button
                   key={item.id}
                   type="button"
                   onClick={() => onNavigate(item.id)}
-                  className={`group relative inline-flex items-center gap-1.5 rounded-md px-3.5 py-2 text-[13.5px] font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D4AF37] ${
+                  aria-label={
+                    hasAlert ? `${item.label} (${item.alertCount} phim mới)` : item.label
+                  }
+                  className={`group relative inline-flex items-center gap-1.5 rounded-md px-2 lg:px-2.5 py-2 text-[12.5px] lg:text-[13.5px] font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D4AF37] ${
                     isActive
                       ? 'text-[#9A7418] dark:text-[#F0D075]'
                       : 'text-zinc-600 hover:bg-zinc-900/[0.045] hover:text-zinc-950 dark:text-zinc-300/85 dark:hover:bg-white/[0.05] dark:hover:text-white'
                   }`}
                 >
                   <span>{item.label}</span>
-                  {typeof item.count === 'number' && item.count > 0 && (
+                  {hasAlert && (
+                    <span
+                      data-testid="new-movies-nav-badge"
+                      className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[#E11D48] px-1.5 font-mono text-[10px] font-bold leading-none text-white tabular-nums shadow-sm"
+                    >
+                      {(item.alertCount ?? 0) > 99 ? '99+' : item.alertCount}
+                    </span>
+                  )}
+                  {!hasAlert && typeof item.count === 'number' && item.count > 0 && (
                     <span
                       className={`font-mono text-[11px] tabular-nums transition-colors ${
                         isActive
@@ -107,7 +148,9 @@ export function Navbar({
                   <span
                     aria-hidden="true"
                     className={`absolute inset-x-3 -bottom-[9px] h-[2px] rounded-full bg-gradient-to-r from-[#9A7418]/70 via-[#9A7418] to-[#9A7418]/70 dark:from-[#D4AF37]/60 dark:via-[#F0D075] dark:to-[#D4AF37]/60 dark:shadow-[0_0_12px_rgba(212,175,55,0.65)] transition-all duration-250 ease-out origin-center ${
-                      isActive ? 'scale-x-100 opacity-100' : 'scale-x-0 opacity-0 group-hover:scale-x-50 group-hover:opacity-40'
+                      isActive
+                        ? 'scale-x-100 opacity-100'
+                        : 'scale-x-0 opacity-0 group-hover:scale-x-50 group-hover:opacity-40'
                     }`}
                   />
                 </button>
@@ -167,65 +210,101 @@ export function Navbar({
         aria-label="Điều hướng di động"
         className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-900/10 bg-[#F5F3EE]/95 backdrop-blur-xl dark:border-white/10 dark:bg-[#08080C]/95"
       >
-        <div className="grid grid-cols-5 h-[58px]">
+        <div className="grid grid-cols-7 h-[58px]">
           <button
             type="button"
             onClick={() => onNavigate('explore')}
-            className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium whitespace-nowrap ${
+            className={`flex flex-col items-center justify-center gap-0.5 text-[9.5px] font-medium whitespace-nowrap ${
               activeTab === 'explore'
                 ? 'text-[#9A7418] dark:text-[#D4AF37]'
                 : 'text-zinc-500 dark:text-zinc-400'
             }`}
           >
-            <Compass className="h-5 w-5" />
+            <Compass className="h-4.5 w-4.5" />
             <span>Khám phá</span>
           </button>
           <button
             type="button"
+            onClick={() => onNavigate('new-releases')}
+            aria-label={
+              newMoviesCount > 0 ? `Phim mới (${newMoviesCount} phim mới)` : 'Phim mới'
+            }
+            className={`relative flex flex-col items-center justify-center gap-0.5 text-[9.5px] font-medium whitespace-nowrap ${
+              activeTab === 'new-releases'
+                ? 'text-[#9A7418] dark:text-[#D4AF37]'
+                : 'text-zinc-500 dark:text-zinc-400'
+            }`}
+          >
+            <span className="relative inline-flex">
+              <BellDot className="h-4.5 w-4.5" />
+              {newMoviesCount > 0 && (
+                <span className="absolute -top-1.5 -right-2.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#E11D48] px-1 font-mono text-[9px] font-bold leading-none text-white tabular-nums">
+                  {newMoviesCount > 99 ? '99+' : newMoviesCount}
+                </span>
+              )}
+            </span>
+            <span>Phim mới</span>
+          </button>
+          <button
+            type="button"
             onClick={() => onNavigate('dubbed')}
-            className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium whitespace-nowrap ${
+            aria-label="Phim thuyết minh"
+            className={`flex flex-col items-center justify-center gap-0.5 text-[9.5px] font-medium whitespace-nowrap ${
               activeTab === 'dubbed'
                 ? 'text-[#9A7418] dark:text-[#D4AF37]'
                 : 'text-zinc-500 dark:text-zinc-400'
             }`}
           >
-            <Mic className="h-5 w-5" />
-            <span>Thuyết minh</span>
+            <Mic className="h-4.5 w-4.5" />
+            <span>Th.Minh</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate('ai-short')}
+            aria-label="Phim ngắn AI"
+            className={`flex flex-col items-center justify-center gap-0.5 text-[9.5px] font-medium whitespace-nowrap ${
+              activeTab === 'ai-short'
+                ? 'text-[#9A7418] dark:text-[#D4AF37]'
+                : 'text-zinc-500 dark:text-zinc-400'
+            }`}
+          >
+            <Clapperboard className="h-4.5 w-4.5" />
+            <span>Ngắn AI</span>
           </button>
           <button
             type="button"
             onClick={() => onNavigate('recommendations')}
-            className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium whitespace-nowrap ${
+            className={`flex flex-col items-center justify-center gap-0.5 text-[9.5px] font-medium whitespace-nowrap ${
               activeTab === 'recommendations'
                 ? 'text-[#9A7418] dark:text-[#D4AF37]'
                 : 'text-zinc-500 dark:text-zinc-400'
             }`}
           >
-            <Sparkles className="h-5 w-5" />
+            <Sparkles className="h-4.5 w-4.5" />
             <span>Gợi ý</span>
           </button>
           <button
             type="button"
             onClick={() => onNavigate('history')}
-            className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium whitespace-nowrap ${
+            className={`flex flex-col items-center justify-center gap-0.5 text-[9.5px] font-medium whitespace-nowrap ${
               activeTab === 'history'
                 ? 'text-[#9A7418] dark:text-[#D4AF37]'
                 : 'text-zinc-500 dark:text-zinc-400'
             }`}
           >
-            <History className="h-5 w-5" />
+            <History className="h-4.5 w-4.5" />
             <span>Lịch sử</span>
           </button>
           <button
             type="button"
             onClick={() => onNavigate('favorites')}
-            className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium whitespace-nowrap ${
+            className={`flex flex-col items-center justify-center gap-0.5 text-[9.5px] font-medium whitespace-nowrap ${
               activeTab === 'favorites'
                 ? 'text-[#9A7418] dark:text-[#D4AF37]'
                 : 'text-zinc-500 dark:text-zinc-400'
             }`}
           >
-            <Heart className="h-5 w-5" />
+            <Heart className="h-4.5 w-4.5" />
             <span>Yêu thích</span>
           </button>
         </div>

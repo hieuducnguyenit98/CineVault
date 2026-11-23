@@ -1,5 +1,5 @@
 import { useState, type CSSProperties, type FormEvent, type RefObject } from 'react';
-import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Film, Moon, RotateCcw, Search, Sparkles, Sun, X } from 'lucide-react';
+import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Film, Moon, RotateCcw, Search, Sparkles, Sun, TrendingUp, X } from 'lucide-react';
 import type {
   CountryItem,
   GenreItem,
@@ -8,6 +8,7 @@ import type {
   RecommendedMovie,
   ThemeMode,
   WatchHistoryEntry,
+  WeeklyTopResponse,
 } from '../types/movie';
 import { HeroSpotlight } from './HeroSpotlight';
 import { MovieCard } from './MovieCard';
@@ -24,6 +25,7 @@ import {
   smoothScrollToElement,
   smoothScrollToY,
 } from '../utils/scrollReveal';
+import { formatWeeklyWatchMetric } from '../utils/weeklyTop';
 
 export type CatalogCategory = 'latest' | 'phim-chieu-rap' | 'phim-le' | 'phim-bo' | 'hoat-hinh' | 'tv-shows';
 
@@ -71,6 +73,8 @@ interface ExploreViewProps {
   onLoadExtraShelves: () => void;
   onRetryGenreShelves: () => void;
   watchHistory: WatchHistoryEntry[];
+  weeklyTop: WeeklyTopResponse | null;
+  weeklyTopLoading: boolean;
   loading: boolean;
   error: string | null;
   page: number;
@@ -191,6 +195,8 @@ export function ExploreView({
   onLoadExtraShelves,
   onRetryGenreShelves,
   watchHistory,
+  weeklyTop,
+  weeklyTopLoading,
   loading,
   error,
   page,
@@ -572,6 +578,70 @@ export function ExploreView({
               );
             })}
           </div>
+        </ScrollRevealShelf>
+      )}
+
+      {/* Weekly Top Most-Watched Rail (based on rolling 7-day user watch history) */}
+      {showHomeSections && (
+        <ScrollRevealShelf
+          ariaLabel="Top xem nhiều trong tuần"
+          className="space-y-4"
+        >
+          <div className="reveal-shelf-header flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <TrendingUp className="h-4 w-4 text-[#9A7418] dark:text-[#D4AF37]" aria-hidden="true" />
+                <h2 className="font-display text-2xl sm:text-3xl font-bold leading-[1.18] text-zinc-900 dark:text-zinc-50">
+                  Top xem nhiều trong tuần
+                </h2>
+              </div>
+              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                Tổng hợp theo dữ liệu lịch sử xem phim thực tế của người dùng trong 7 ngày gần nhất
+              </p>
+            </div>
+            {weeklyTop && weeklyTop.items.length > 0 && (
+              <span className="shrink-0 whitespace-nowrap font-mono text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+                Top {Math.min(6, weeklyTop.items.length)} tuần này · {weeklyTop.totalTrackedViews} lượt xem
+              </span>
+            )}
+          </div>
+
+          {weeklyTopLoading && (!weeklyTop || weeklyTop.items.length === 0) ? (
+            <MovieGridSkeleton count={6} label="Đang tổng hợp bảng xếp hạng xem nhiều trong tuần" />
+          ) : !weeklyTop || weeklyTop.items.length === 0 ? (
+            <div className="rounded-2xl border border-zinc-900/10 bg-white/80 p-6 text-center dark:border-white/10 dark:bg-[#101015]/90">
+              <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                Chưa có dữ liệu lượt xem trong 7 ngày qua
+              </p>
+              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                Hãy mở xem một bộ phim bất kỳ để hệ thống ghi nhận vào bảng xếp hạng tuần này.
+              </p>
+            </div>
+          ) : (
+            <div
+              data-testid="weekly-top-grid"
+              className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6"
+            >
+              {weeklyTop.items.slice(0, 6).map((entry, idx) => {
+                const hist = historyMap.get(entry.movie.slug);
+                return (
+                  <div
+                    key={`weekly-top-${entry.movie.slug}`}
+                    className="reveal-poster-item"
+                    style={{ '--reveal-delay': `${computePosterRevealDelay(idx)}ms` } as CSSProperties}
+                  >
+                    <MovieCard
+                      movie={entry.movie}
+                      rank={entry.rank}
+                      onSelect={(s) => onSelectMovie(s, hist?.nextEpisodeSlug || hist?.episodeSlug)}
+                      watchedEpisodeLabel={hist ? `Đã xem ${hist.episodeName}` : undefined}
+                      subtitleNote={formatWeeklyWatchMetric(entry)}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </ScrollRevealShelf>
       )}
 

@@ -1,11 +1,13 @@
 import type {
   CatalogResponse,
   CountryItem,
+  DailyUpdatesResponse,
   GenreItem,
   GenreShelf,
   MovieDetail,
   MovieSummary,
   UserDataState,
+  WeeklyTopResponse,
 } from '../types/movie';
 
 import {
@@ -109,6 +111,54 @@ export function fetchThuyetMinhMovies(
   if (options.category) qs.set('category', options.category);
   if (options.country) qs.set('country', options.country);
   return requestJson<CatalogResponse>(`/api/movies/thuyet-minh?${qs.toString()}`);
+}
+
+export function fetchChineseAiShortMovies(
+  options: {
+    page?: number;
+    limit?: number;
+    category?: string;
+    format?: 'all' | 'series' | 'vi-sub' | 'ultra-short' | 'cn-raw';
+  } = {}
+): Promise<CatalogResponse> {
+  const qs = new URLSearchParams({
+    page: String(options.page ?? 1),
+    limit: String(options.limit ?? 24),
+  });
+  if (options.category) qs.set('category', options.category);
+  if (options.format && options.format !== 'all') qs.set('format', options.format);
+  return requestJson<CatalogResponse>(`/api/movies/phim-ngan-ai?${qs.toString()}`);
+}
+
+export function fetchDailyUpdates(): Promise<DailyUpdatesResponse> {
+  return requestJson<DailyUpdatesResponse>('/api/movies/daily-updates');
+}
+
+export function refreshDailyUpdatesApi(): Promise<{
+  snapshot: DailyUpdatesResponse;
+  addedNowCount: number;
+}> {
+  return requestJson<{ snapshot: DailyUpdatesResponse; addedNowCount: number }>(
+    '/api/movies/daily-updates/refresh',
+    { method: 'POST' }
+  );
+}
+
+export function fetchWeeklyTop(limit = 10): Promise<WeeklyTopResponse> {
+  return requestJson<WeeklyTopResponse>(`/api/movies/weekly-top?limit=${limit}`);
+}
+
+export function recordWeeklyWatchApi(payload: {
+  slug: string;
+  viewerKey: string;
+  episodeSlug?: string;
+  progressSeconds?: number;
+  movie: MovieSummary;
+}): Promise<WeeklyTopResponse> {
+  return requestJson<WeeklyTopResponse>('/api/movies/weekly-top/record', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export function fetchMoviesByGenre(

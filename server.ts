@@ -5,7 +5,14 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { CatalogResponse, GenreItem, UserDataState } from './src/types/movie.ts';
+import type {
+  CatalogResponse,
+  DailyUpdatesSnapshot,
+  GenreItem,
+  MovieSummary,
+  UserDataState,
+  WeeklyWatchEventRecord,
+} from './src/types/movie.ts';
 import {
   DEFAULT_ACCESS_CODE_DIGEST,
   hashAccessCode,
@@ -38,6 +45,29 @@ import {
   normalizeUserState,
   sanitizeSyncKey,
 } from './src/utils/syncStorage.ts';
+import {
+  AI_SHORT_CHANNEL_FEEDS,
+  YT_AI_SLUG_PREFIX,
+  buildAiShortCatalogResponse,
+  buildYoutubeAiDetail,
+  findGroupedSeriesForVideoId,
+  getAiShortGenreQueries,
+  mergeAiShortRecords,
+  parseYouTubeChannelBrowse,
+  parseYouTubeInnerTubeSearch,
+  parseYouTubeRssXml,
+  type AiShortFormatFilter,
+  type AiShortSourceRecord,
+} from './src/utils/aiShortCatalog.ts';
+import {
+  DAILY_AUTO_CHECK_INTERVAL_MS,
+  buildDailyUpdateSnapshot,
+  toPublicDailyUpdatesResponse,
+} from './src/utils/dailyUpdates.ts';
+import {
+  WEEKLY_WINDOW_MS,
+  aggregateWeeklyTopFromSources,
+} from './src/utils/weeklyTop.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,6 +77,8 @@ const PHIMAPI_BASE = 'https://phimapi.com';
 const NGUONC_BASE = 'https://phim.nguonc.com';
 const DATA_DIR = path.join(__dirname, '.data');
 const SYNC_FILE = path.join(DATA_DIR, 'sync-profiles.json');
+const DAILY_UPDATES_FILE = path.join(DATA_DIR, 'daily-updates.json');
+const WEEKLY_VIEWS_FILE = path.join(DATA_DIR, 'weekly-views.json');
 const ACCESS_SECRET_FILE = path.join(DATA_DIR, '.access-secret');
 
 function getOrCreateAccessSecret(): string {
@@ -140,6 +172,100 @@ function writeSyncStore(store: Record<string, UserDataState>): void {
   } catch (err) {
     console.error('Failed to persist sync profiles:', err);
   }
+}
+
+function readDailyUpdatesStore(): DailyUpdatesSnapshot | null {
+  try {
+    if (!fs.existsSync(DAILY_UPDATES_FILE)) return null;
+    const raw = fs.readFileSync(DAILY_UPDATES_FILE, 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<DailyUpdatesSnapshot>;
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.entries)) {
+      return null;
+    }
+    return {
+      dateKey: typeof parsed.dateKey === 'string' ? parsed.dateKey : getVietnamDateKey(),
+      lastUpdatedAt: Number(parsed.lastUpdatedAt) || 0,
+      nextAutoCheckAt: Number(parsed.nextAutoCheckAt) || 0,
+      newlyAddedCount: Number(parsed.newlyAddedCount) || 0,
+      entries: parsed.entries,
+      knownSignatures:
+        parsed.knownSignatures && typeof parsed.knownSignatures === 'object'
+          ? parsed.knownSignatures
+          : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeDailyUpdatesStore(snapshot: DailyUpdatesSnapshot): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(DAILY_UPDATES_FILE, JSON.stringify(snapshot, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to persist daily movie updates:', err);
+  }
+}
+
+function sanitizeSafeMediaUrl(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('https://') || trimmed.startsWith('http://') || trimmed.startsWith('/')) {
+    return trimmed.slice(0, 600);
+  }
+  return '';
+}
+
+function readWeeklyViewsStore(now = Date.now()): Record<string, WeeklyWatchEventRecord> {
+  try {
+    if (!fs.existsSync(WEEKLY_VIEWS_FILE)) return {};
+    const raw = fs.readFileSync(WEEKLY_VIEWS_FILE, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, WeeklyWatchEventRecord>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const cutoff = now - WEEKLY_WINDOW_MS;
+    const pruned: Record<string, WeeklyWatchEventRecord> = {};
+    for (const [k, rec] of Object.entries(parsed)) {
+      if (
+        rec &&
+        typeof rec.slug === 'string' &&
+        typeof rec.viewerKey === 'string' &&
+        typeof rec.lastWatchedAt === 'number' &&
+        rec.lastWatchedAt >= cutoff &&
+        rec.movie &&
+        typeof rec.movie.name === 'string'
+      ) {
+        pruned[k] = rec;
+      }
+    }
+    return pruned;
+  } catch {
+    return {};
+  }
+}
+
+function writeWeeklyViewsStore(store: Record<string, WeeklyWatchEventRecord>): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(WEEKLY_VIEWS_FILE, JSON.stringify(store, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to persist weekly movie views:', err);
+  }
+}
+
+function buildWeeklyTopResponse(now = Date.now(), limit = 12) {
+  const profiles = readSyncStore();
+  const eventsMap = readWeeklyViewsStore(now);
+  return aggregateWeeklyTopFromSources({
+    profiles,
+    recordedEvents: Object.values(eventsMap),
+    now,
+    limit,
+  });
 }
 
 function parseImageDimensionsFromBuffer(
@@ -619,6 +745,492 @@ async function startServer() {
     }
   });
 
+  const ytAiRecordCache = new Map<string, AiShortSourceRecord>();
+
+  async function runWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    worker: (item: T) => Promise<R>
+  ): Promise<PromiseSettledResult<R>[]> {
+    const results: PromiseSettledResult<R>[] = new Array(items.length);
+    let nextIdx = 0;
+    const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (nextIdx < items.length) {
+        const idx = nextIdx++;
+        try {
+          const val = await worker(items[idx]);
+          results[idx] = { status: 'fulfilled', value: val };
+        } catch (err) {
+          results[idx] = { status: 'rejected', reason: err };
+        }
+      }
+    });
+    await Promise.all(runners);
+    return results;
+  }
+
+  async function fetchYouTubeRssChannel(
+    channel: (typeof AI_SHORT_CHANNEL_FEEDS)[number]
+  ): Promise<AiShortSourceRecord[]> {
+    const cacheKey = `yt-rss:${channel.channelId}`;
+    const now = Date.now();
+    const cached = apiCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.data as AiShortSourceRecord[];
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    try {
+      const res = await fetch(
+        `https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(channel.channelId)}`,
+        {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CineVault/1.0)' },
+        }
+      );
+      if (!res.ok) return [];
+      const xml = await res.text();
+      const parsed = parseYouTubeRssXml(xml, {
+        channelId: channel.channelId,
+        channelName: channel.name,
+        isVietnamese: channel.isVietnamese,
+        isPureAi: channel.isPureAi,
+      });
+      apiCache.set(cacheKey, { expiresAt: now + 25 * 60 * 1000, data: parsed });
+      return parsed;
+    } catch {
+      return [];
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function postYouTubeBrowse(payload: Record<string, unknown>): Promise<unknown | null> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch('https://www.youtube.com/youtubei/v1/browse', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept-Language': 'vi-VN,vi;q=0.9,zh-CN;q=0.8',
+        },
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: 'WEB',
+              clientVersion: '2.20241120.01.00',
+              hl: 'vi',
+              gl: 'VN',
+            },
+          },
+          ...payload,
+        }),
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as unknown;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function fetchYouTubeChannelDeep(
+    channel: (typeof AI_SHORT_CHANNEL_FEEDS)[number]
+  ): Promise<AiShortSourceRecord[]> {
+    const cacheKey = `yt-deep:${channel.channelId}`;
+    const now = Date.now();
+    const cached = apiCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.data as AiShortSourceRecord[];
+    }
+
+    const meta = {
+      channelId: channel.channelId,
+      channelName: channel.name,
+      isVietnamese: channel.isVietnamese,
+      isPureAi: channel.isPureAi,
+    };
+
+    const [rssRecords, page1Json] = await Promise.all([
+      fetchYouTubeRssChannel(channel),
+      postYouTubeBrowse({
+        browseId: channel.channelId,
+        params: 'EgZ2aWRlb3PyBgQKAjoA',
+      }),
+    ]);
+
+    const page1 = parseYouTubeChannelBrowse(page1Json, meta);
+    let page2Records: AiShortSourceRecord[] = [];
+    if (page1.continuationToken) {
+      const page2Json = await postYouTubeBrowse({
+        continuation: page1.continuationToken,
+      });
+      const page2 = parseYouTubeChannelBrowse(page2Json, meta);
+      page2Records = page2.records;
+    }
+
+    const merged = mergeAiShortRecords([rssRecords, page1.records, page2Records]);
+    if (merged.length > 0) {
+      apiCache.set(cacheKey, { expiresAt: now + 25 * 60 * 1000, data: merged });
+    }
+    return merged;
+  }
+
+  async function fetchYouTubeInnerTube(
+    query: string,
+    queriedGenreSlug?: string
+  ): Promise<AiShortSourceRecord[]> {
+    const cacheKey = `yt-search:${query}:${queriedGenreSlug ?? ''}`;
+    const now = Date.now();
+    const cached = apiCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.data as AiShortSourceRecord[];
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch('https://www.youtube.com/youtubei/v1/search', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept-Language': 'vi-VN,vi;q=0.9,zh-CN;q=0.8',
+        },
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: 'WEB',
+              clientVersion: '2.20241120.01.00',
+              hl: 'vi',
+              gl: 'VN',
+            },
+          },
+          query,
+        }),
+      });
+      if (!res.ok) return [];
+      const json = (await res.json()) as unknown;
+      const parsed = parseYouTubeInnerTubeSearch(json, queriedGenreSlug);
+      apiCache.set(cacheKey, { expiresAt: now + 25 * 60 * 1000, data: parsed });
+      return parsed;
+    } catch {
+      return [];
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  // 2d. Chinese AI Short Films & Micro-Dramas (Deep YouTube AI channels + genre search + series grouping)
+  app.get('/api/movies/phim-ngan-ai', async (req, res) => {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(36, Math.max(6, Number(req.query.limit) || 24));
+    const category =
+      typeof req.query.category === 'string'
+        ? req.query.category.replace(/[^a-z0-9-]/gi, '').trim()
+        : '';
+    const rawFormat = typeof req.query.format === 'string' ? req.query.format.trim() : 'all';
+    const format: AiShortFormatFilter =
+      rawFormat === 'series' ||
+      rawFormat === 'vi-sub' ||
+      rawFormat === 'ultra-short' ||
+      rawFormat === 'cn-raw'
+        ? rawFormat
+        : 'all';
+
+    const queries = getAiShortGenreQueries(category);
+    const [deepChannelResults, searchResults] = await Promise.all([
+      runWithConcurrency(AI_SHORT_CHANNEL_FEEDS, 8, (ch) => fetchYouTubeChannelDeep(ch)),
+      runWithConcurrency(queries, 6, (q) => fetchYouTubeInnerTube(q, category || undefined)),
+    ]);
+
+    const groups: AiShortSourceRecord[][] = [];
+    for (const r of deepChannelResults) {
+      if (r.status === 'fulfilled' && r.value.length > 0) groups.push(r.value);
+    }
+    for (const r of searchResults) {
+      if (r.status === 'fulfilled' && r.value.length > 0) groups.push(r.value);
+    }
+
+    const mergedRecords = mergeAiShortRecords(groups);
+    for (const rec of mergedRecords) {
+      ytAiRecordCache.set(rec.videoId, rec);
+    }
+
+    if (mergedRecords.length === 0) {
+      res.status(502).json({
+        error: 'Không thể tải danh sách phim ngắn AI Trung Quốc từ YouTube lúc này.',
+      });
+      return;
+    }
+
+    res.json(buildAiShortCatalogResponse(mergedRecords, { category, format, page, limit }));
+  });
+
+  // 2e. Daily Auto-Updated New Movies Tracker (aggregates PhimAPI + NguonC + Thuyết Minh + YouTube AI)
+  let dailySnapshotMem: DailyUpdatesSnapshot | null = readDailyUpdatesStore();
+  let inFlightDailyUpdate: Promise<{
+    snapshot: DailyUpdatesSnapshot;
+    addedSinceLastRunCount: number;
+  }> | null = null;
+
+  async function runDailyUpdateJob(forceRefresh = false): Promise<{
+    snapshot: DailyUpdatesSnapshot;
+    addedSinceLastRunCount: number;
+  }> {
+    if (inFlightDailyUpdate) {
+      return inFlightDailyUpdate;
+    }
+
+    inFlightDailyUpdate = (async () => {
+      try {
+        const urlsToClear = [
+          `${PHIMAPI_BASE}/danh-sach/phim-moi-cap-nhat-v3?page=1`,
+          `${PHIMAPI_BASE}/danh-sach/phim-moi-cap-nhat-v3?page=2`,
+          `${NGUONC_BASE}/api/films/phim-moi-cap-nhat?page=1`,
+          `${NGUONC_BASE}/api/films/phim-moi-cap-nhat?page=2`,
+          `${PHIMAPI_BASE}/v1/api/danh-sach/phim-thuyet-minh?page=1&limit=24`,
+        ];
+        if (forceRefresh) {
+          for (const url of urlsToClear) {
+            apiCache.delete(url);
+          }
+          for (const ch of AI_SHORT_CHANNEL_FEEDS) {
+            apiCache.delete(`yt-rss:${ch.channelId}`);
+          }
+        }
+
+        const [p1, p2, n1, n2, tm1, aiRssResults] = await Promise.all([
+          fetchJsonWithCache<Record<string, unknown>>(urlsToClear[0]).catch(() => null),
+          fetchJsonWithCache<Record<string, unknown>>(urlsToClear[1]).catch(() => null),
+          fetchJsonWithCache<Record<string, unknown>>(urlsToClear[2]).catch(() => null),
+          fetchJsonWithCache<Record<string, unknown>>(urlsToClear[3]).catch(() => null),
+          fetchJsonWithCache<Record<string, unknown>>(urlsToClear[4]).catch(() => null),
+          runWithConcurrency(AI_SHORT_CHANNEL_FEEDS.slice(0, 14), 7, (ch) =>
+            fetchYouTubeRssChannel(ch)
+          ),
+        ]);
+
+        const phimApiLatest: MovieSummary[] = [
+          ...(p1 ? normalizeCatalogResponse(p1).items : []),
+          ...(p2 ? normalizeCatalogResponse(p2).items : []),
+        ];
+        const nguonCLatest: MovieSummary[] = [
+          ...(n1 ? normalizeNguonCListResponse(n1).items : []),
+          ...(n2 ? normalizeNguonCListResponse(n2).items : []),
+        ];
+        const dubbedLatest: MovieSummary[] = tm1
+          ? normalizeCatalogResponse(tm1).items.map((item) => ({
+              ...item,
+              lang: hasVietnameseNarration(item)
+                ? item.lang
+                : item.lang
+                ? `${item.lang} + Thuyết Minh`
+                : 'Thuyết Minh',
+            }))
+          : [];
+
+        const rssGroups: AiShortSourceRecord[][] = [];
+        for (const r of aiRssResults) {
+          if (r.status === 'fulfilled' && r.value.length > 0) {
+            rssGroups.push(r.value);
+          }
+        }
+        const mergedAiRecs = mergeAiShortRecords([
+          ...rssGroups,
+          Array.from(ytAiRecordCache.values()),
+        ]);
+        for (const rec of mergedAiRecs) {
+          ytAiRecordCache.set(rec.videoId, rec);
+        }
+        const aiCatalog = buildAiShortCatalogResponse(mergedAiRecs, {
+          page: 1,
+          limit: 24,
+        });
+
+        const dateKey = getVietnamDateKey();
+        const previousSnapshot = dailySnapshotMem ?? readDailyUpdatesStore();
+        const result = buildDailyUpdateSnapshot({
+          dateKey,
+          previousSnapshot,
+          phimApiLatest,
+          nguonCLatest,
+          dubbedLatest,
+          aiShortMovies: aiCatalog.items,
+          now: Date.now(),
+        });
+
+        dailySnapshotMem = result.snapshot;
+        writeDailyUpdatesStore(result.snapshot);
+        return result;
+      } finally {
+        inFlightDailyUpdate = null;
+      }
+    })();
+
+    return inFlightDailyUpdate;
+  }
+
+  app.get('/api/movies/daily-updates', async (_req, res) => {
+    try {
+      const todayKey = getVietnamDateKey();
+      const now = Date.now();
+      const existing = dailySnapshotMem ?? readDailyUpdatesStore();
+      if (
+        !existing ||
+        existing.entries.length === 0 ||
+        existing.dateKey !== todayKey ||
+        now >= existing.nextAutoCheckAt
+      ) {
+        const { snapshot } = await runDailyUpdateJob(Boolean(existing && existing.dateKey !== todayKey));
+        res.json(toPublicDailyUpdatesResponse(snapshot));
+        return;
+      }
+      res.json(toPublicDailyUpdatesResponse(existing));
+    } catch {
+      res.status(502).json({ error: 'Không thể kiểm tra phim mới cập nhật lúc này.' });
+    }
+  });
+
+  app.post('/api/movies/daily-updates/refresh', async (_req, res) => {
+    try {
+      const { snapshot, addedSinceLastRunCount } = await runDailyUpdateJob(true);
+      res.json({
+        snapshot: toPublicDailyUpdatesResponse(snapshot),
+        addedNowCount: addedSinceLastRunCount,
+      });
+    } catch {
+      res.status(502).json({ error: 'Không thể cập nhật danh sách phim mới lúc này.' });
+    }
+  });
+
+  // 2d. Weekly Top Most-Watched Movies (rolling 7-day ranking from user watch histories + active watch events)
+  app.get('/api/movies/weekly-top', (req, res) => {
+    const requestedLimit = Number(req.query.limit) || 10;
+    const limit = Math.min(20, Math.max(4, requestedLimit));
+    res.json(buildWeeklyTopResponse(Date.now(), limit));
+  });
+
+  app.post('/api/movies/weekly-top/record', (req, res) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const rawSlug = typeof body.slug === 'string' ? body.slug.trim() : '';
+    if (!/^[a-zA-Z0-9_-]{1,140}$/.test(rawSlug)) {
+      res.status(400).json({ error: 'Slug phim không hợp lệ.' });
+      return;
+    }
+
+    const rawMovie = (body.movie && typeof body.movie === 'object' ? body.movie : {}) as Record<string, unknown>;
+    const movieName = typeof rawMovie.name === 'string' ? rawMovie.name.trim().slice(0, 180) : '';
+    if (!movieName) {
+      res.status(400).json({ error: 'Thiếu thông tin tên phim.' });
+      return;
+    }
+
+    const rawSyncKey = typeof body.viewerKey === 'string' ? sanitizeSyncKey(body.viewerKey) : '';
+    const tokenHeader = typeof req.headers['x-access-token'] === 'string' ? req.headers['x-access-token'] : '';
+    const viewerKey =
+      rawSyncKey.length >= 4
+        ? rawSyncKey
+        : `VIEWER-${crypto
+            .createHash('sha256')
+            .update(`${tokenHeader}|${req.ip || ''}`)
+            .digest('hex')
+            .slice(0, 10)
+            .toUpperCase()}`;
+
+    const episodeSlug =
+      typeof body.episodeSlug === 'string'
+        ? body.episodeSlug.trim().slice(0, 120)
+        : '';
+    const progressSeconds = Math.max(
+      0,
+      Math.min(86400, Math.round(Number(body.progressSeconds) || 0))
+    );
+
+    const movie: MovieSummary = {
+      id: rawSlug,
+      name: movieName,
+      originName:
+        typeof rawMovie.originName === 'string' ? rawMovie.originName.trim().slice(0, 180) : movieName,
+      slug: rawSlug,
+      type: typeof rawMovie.type === 'string' ? rawMovie.type.slice(0, 32) : 'series',
+      posterUrl: sanitizeSafeMediaUrl(rawMovie.posterUrl),
+      thumbUrl: sanitizeSafeMediaUrl(rawMovie.thumbUrl),
+      year: Math.max(0, Math.min(2100, Math.round(Number(rawMovie.year) || 0))),
+      quality: typeof rawMovie.quality === 'string' ? rawMovie.quality.slice(0, 24) : 'FHD',
+      lang: typeof rawMovie.lang === 'string' ? rawMovie.lang.slice(0, 60) : 'Vietsub',
+      time: typeof rawMovie.time === 'string' ? rawMovie.time.slice(0, 40) : '',
+      episodeCurrent:
+        typeof rawMovie.episodeCurrent === 'string' ? rawMovie.episodeCurrent.slice(0, 60) : '',
+      categories: Array.isArray(rawMovie.categories)
+        ? (rawMovie.categories as Array<Record<string, unknown>>)
+            .slice(0, 12)
+            .map((c) => ({
+              id: String(c?.id ?? c?.slug ?? '').slice(0, 60),
+              name: String(c?.name ?? '').slice(0, 60),
+              slug: String(c?.slug ?? '').slice(0, 60),
+            }))
+            .filter((c) => c.name && c.slug)
+        : [],
+      countries: Array.isArray(rawMovie.countries)
+        ? (rawMovie.countries as Array<Record<string, unknown>>)
+            .slice(0, 8)
+            .map((c) => ({
+              id: String(c?.id ?? c?.slug ?? '').slice(0, 60),
+              name: String(c?.name ?? '').slice(0, 60),
+              slug: String(c?.slug ?? '').slice(0, 60),
+            }))
+            .filter((c) => c.name && c.slug)
+        : [],
+      rating: {
+        voteAverage: Math.max(0, Math.min(10, Number((rawMovie.rating as Record<string, unknown> | undefined)?.voteAverage) || 0)),
+        voteCount: Math.max(0, Math.round(Number((rawMovie.rating as Record<string, unknown> | undefined)?.voteCount) || 0)),
+      },
+      modifiedAt: '',
+    };
+
+    const now = Date.now();
+    const store = readWeeklyViewsStore(now);
+    const key = `${viewerKey}::${rawSlug}`;
+    const existing = store[key];
+
+    if (!existing) {
+      store[key] = {
+        slug: rawSlug,
+        viewerKey,
+        movie,
+        watchedEpisodes: episodeSlug ? [episodeSlug] : [],
+        viewHits: 1,
+        progressSeconds,
+        lastWatchedAt: now,
+      };
+    } else {
+      const episodeSet = new Set(existing.watchedEpisodes);
+      const isNewEpisode = Boolean(episodeSlug && !episodeSet.has(episodeSlug));
+      if (episodeSlug) episodeSet.add(episodeSlug);
+      const isRepeatSession = now - existing.lastWatchedAt >= 30 * 60 * 1000;
+      store[key] = {
+        slug: rawSlug,
+        viewerKey,
+        movie: {
+          ...existing.movie,
+          ...movie,
+          posterUrl: movie.posterUrl || existing.movie.posterUrl,
+          thumbUrl: movie.thumbUrl || existing.movie.thumbUrl,
+        },
+        watchedEpisodes: Array.from(episodeSet).slice(0, 500),
+        viewHits: existing.viewHits + (isNewEpisode || isRepeatSession ? 1 : 0),
+        progressSeconds: Math.max(existing.progressSeconds, progressSeconds),
+        lastWatchedAt: now,
+      };
+    }
+
+    writeWeeklyViewsStore(store);
+    res.json(buildWeeklyTopResponse(now, 10));
+  });
+
   // 3. Genre list
   app.get('/api/movies/genres', async (_req, res) => {
     try {
@@ -844,11 +1456,64 @@ async function startServer() {
     }
   });
 
-  // 6. Movie details & episodes (PhimAPI + NguonC fallback & server merge)
+  // 6. Movie details & episodes (PhimAPI + NguonC fallback & YouTube AI detail support)
   app.get('/api/movies/detail/:slug', async (req, res) => {
-    const slug = req.params.slug.replace(/[^a-z0-9-]/gi, '');
+    const slug = req.params.slug.replace(/[^a-z0-9_-]/gi, '');
     if (!slug) {
       res.status(400).json({ error: 'Invalid movie slug' });
+      return;
+    }
+
+    if (slug.startsWith(YT_AI_SLUG_PREFIX)) {
+      const videoId = slug.slice(YT_AI_SLUG_PREFIX.length);
+      if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+        res.status(400).json({ error: 'Invalid YouTube AI video id' });
+        return;
+      }
+
+      let record = ytAiRecordCache.get(videoId);
+      if (!record) {
+        try {
+          const oembedRes = await fetch(
+            `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(
+              `https://www.youtube.com/watch?v=${videoId}`
+            )}`
+          );
+          if (oembedRes.ok) {
+            const oembed = (await oembedRes.json()) as {
+              title?: string;
+              author_name?: string;
+            };
+            record = {
+              videoId,
+              title: oembed.title || `Phim ngắn AI (${videoId})`,
+              description: `Phim ngắn AI Trung Quốc từ kênh ${oembed.author_name || 'YouTube AI'}.`,
+              channelId: '',
+              channelName: oembed.author_name || 'YouTube AI Studio',
+              publishedAt: new Date().toISOString(),
+              durationText: '',
+              durationSeconds: null,
+              views: 5000,
+              thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+            };
+            ytAiRecordCache.set(videoId, record);
+          }
+        } catch {
+          // Fall through to 404 if YouTube video does not exist
+        }
+      }
+
+      if (!record) {
+        res.status(404).json({ error: 'Không tìm thấy phim ngắn AI này.' });
+        return;
+      }
+
+      const groupedSeries = findGroupedSeriesForVideoId(
+        videoId,
+        Array.from(ytAiRecordCache.values())
+      );
+
+      res.json({ movie: buildYoutubeAiDetail(groupedSeries ?? record) });
       return;
     }
 
@@ -1074,6 +1739,32 @@ async function startServer() {
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`CineVault server running on http://localhost:${PORT}`);
   });
+
+  // Initial warm-up + scheduled daily auto-update check (every 30 mins, refreshing on new Vietnam day or 6h window)
+  setTimeout(() => {
+    const todayKey = getVietnamDateKey();
+    const existing = dailySnapshotMem ?? readDailyUpdatesStore();
+    if (
+      !existing ||
+      existing.entries.length === 0 ||
+      existing.dateKey !== todayKey ||
+      Date.now() - existing.lastUpdatedAt >= DAILY_AUTO_CHECK_INTERVAL_MS
+    ) {
+      runDailyUpdateJob(false).catch(() => {});
+    }
+  }, 1500).unref();
+
+  setInterval(() => {
+    const todayKey = getVietnamDateKey();
+    const existing = dailySnapshotMem ?? readDailyUpdatesStore();
+    if (
+      !existing ||
+      existing.dateKey !== todayKey ||
+      Date.now() >= (existing.nextAutoCheckAt || 0)
+    ) {
+      runDailyUpdateJob(true).catch(() => {});
+    }
+  }, 30 * 60 * 1000).unref();
 }
 
 startServer().catch((err) => {

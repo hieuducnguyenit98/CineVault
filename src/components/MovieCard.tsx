@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Film, Mic, Play } from 'lucide-react';
 import type { MovieSummary } from '../types/movie';
 import { hasVietnameseNarration } from '../utils/movieNormalizer';
@@ -13,6 +13,8 @@ interface MovieCardProps {
   watchedEpisodeLabel?: string;
   matchPercent?: number;
   reason?: string;
+  isNew?: boolean;
+  rank?: number;
 }
 
 export function MovieCard({
@@ -23,14 +25,24 @@ export function MovieCard({
   watchedEpisodeLabel,
   matchPercent,
   reason,
+  isNew = false,
+  rank,
 }: MovieCardProps) {
   const [imgError, setImgError] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const isNarrated = hasVietnameseNarration(movie);
   const imageSrc =
     !imgError && (movie.posterUrl || movie.thumbUrl)
       ? movie.posterUrl || movie.thumbUrl
       : FALLBACK_CINEMA_IMAGE;
+
+  useEffect(() => {
+    const el = imgRef.current;
+    if (el && el.complete && el.naturalWidth > 0) {
+      setImgLoaded(true);
+    }
+  }, [imageSrc]);
 
   const metaParts = [
     movie.year ? String(movie.year) : '',
@@ -42,7 +54,7 @@ export function MovieCard({
     <button
       type="button"
       onClick={() => onSelect(movie.slug)}
-      aria-label={`Xem phim ${movie.name}${isNarrated ? ' (Có Thuyết Minh)' : ''}`}
+      aria-label={`${typeof rank === 'number' ? `Hạng ${rank}: ` : ''}Xem phim ${movie.name}${isNarrated ? ' (Có Thuyết Minh)' : ''}${isNew ? ' (Phim mới hôm nay)' : ''}`}
       className="group flex flex-col text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D4AF37] rounded-xl"
     >
       <div className="relative aspect-[2/3] w-full overflow-hidden rounded-xl bg-zinc-200 dark:bg-[#101015] border border-zinc-900/10 dark:border-white/10 transition-all duration-300 group-hover:border-[#9A7418]/60 dark:group-hover:border-[#D4AF37]/60 group-hover:shadow-xl group-hover:shadow-black/25">
@@ -50,6 +62,12 @@ export function MovieCard({
           <div aria-hidden="true" className="skeleton-shimmer absolute inset-0 h-full w-full" />
         )}
         <img
+          ref={(el) => {
+            imgRef.current = el;
+            if (el && el.complete && el.naturalWidth > 0 && !imgLoaded) {
+              setImgLoaded(true);
+            }
+          }}
           src={imageSrc}
           alt={movie.name}
           loading="lazy"
@@ -79,6 +97,13 @@ export function MovieCard({
           >
             <Mic className="h-3 w-3 shrink-0" aria-hidden="true" />
             <span>Thuyết Minh</span>
+          </div>
+        )}
+
+        {/* Daily New Arrival Indicator */}
+        {isNew && (
+          <div className="pointer-events-none absolute top-2.5 right-2.5 z-10 inline-flex items-center rounded-md bg-[#E11D48] px-2 py-0.5 text-[10px] font-bold tracking-wide text-white shadow-md">
+            Mới
           </div>
         )}
 
@@ -114,22 +139,32 @@ export function MovieCard({
         )}
       </div>
 
-      <div className="mt-3 space-y-0.5 px-0.5">
-        <h3 className="text-sm font-semibold leading-snug text-zinc-900 dark:text-zinc-100 line-clamp-1 group-hover:text-[#9A7418] dark:group-hover:text-[#D4AF37] transition-colors">
-          {movie.name}
-        </h3>
-        <p className="text-xs text-zinc-500 dark:text-zinc-400 line-clamp-1">
-          {subtitleNote || movie.originName}
-        </p>
-        {typeof matchPercent === 'number' && reason ? (
-          <p className="text-[11px] font-medium text-[#9A7418] dark:text-[#D4AF37] line-clamp-1 tabular-nums">
-            {matchPercent}% hợp gu · {reason}
-          </p>
-        ) : (
-          <p className="font-mono text-[11px] text-zinc-500 dark:text-zinc-500 tabular-nums line-clamp-1">
-            {metaParts.join(' · ')}
-          </p>
+      <div className="mt-3 flex items-start gap-2.5 px-0.5">
+        {typeof rank === 'number' && rank > 0 && (
+          <span
+            aria-hidden="true"
+            className="font-display text-xl font-bold leading-none tabular-nums text-[#9A7418] dark:text-[#D4AF37] pt-0.5 shrink-0"
+          >
+            {String(rank).padStart(2, '0')}
+          </span>
         )}
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <h3 className="text-sm font-semibold leading-snug text-zinc-900 dark:text-zinc-100 line-clamp-1 group-hover:text-[#9A7418] dark:group-hover:text-[#D4AF37] transition-colors">
+            {movie.name}
+          </h3>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 line-clamp-1">
+            {subtitleNote || movie.originName}
+          </p>
+          {typeof matchPercent === 'number' && reason ? (
+            <p className="text-[11px] font-medium text-[#9A7418] dark:text-[#D4AF37] line-clamp-1 tabular-nums">
+              {matchPercent}% hợp gu · {reason}
+            </p>
+          ) : (
+            <p className="font-mono text-[11px] text-zinc-500 dark:text-zinc-500 tabular-nums line-clamp-1">
+              {metaParts.join(' · ')}
+            </p>
+          )}
+        </div>
       </div>
     </button>
   );

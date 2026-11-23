@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { AccessGate } from './components/AccessGate';
+import { AiShortMoviesView } from './components/AiShortMoviesView';
 import { DubbedMoviesView } from './components/DubbedMoviesView';
 import { ExploreView, type CatalogCategory } from './components/ExploreView';
 import { HistoryView } from './components/HistoryView';
 import { MiniPlayer } from './components/MiniPlayer';
 import { Navbar, type ActiveTab } from './components/Navbar';
+import { NewReleasesView } from './components/NewReleasesView';
 import { RecommendationsView } from './components/RecommendationsView';
 import { TheaterDetailSkeleton } from './components/Skeletons';
 import { SyncView } from './components/SyncView';
 import { TheaterView } from './components/TheaterView';
 import {
   checkAccessSessionApi,
+  fetchChineseAiShortMovies,
   fetchCountries,
+  fetchDailyUpdates,
   fetchGenreShelves,
   fetchGenres,
   fetchHeroMovies,
@@ -22,12 +26,23 @@ import {
   fetchMoviesByList,
   fetchTheaterReleaseMovies,
   fetchThuyetMinhMovies,
+  fetchWeeklyTop,
   pullRemoteProfile,
   pushAndMergeRemoteProfile,
+  recordWeeklyWatchApi,
+  refreshDailyUpdatesApi,
   searchMovies,
 } from './services/movieApi';
+import type { AiShortFormatFilter } from './utils/aiShortCatalog';
+import {
+  computeUnreadNewMovies,
+  formatVietnamTimeHHMM,
+} from './utils/dailyUpdates';
+import { getVietnamDateKey } from './utils/heroSelector';
+import { mergeLocalHistoryWithWeeklyTop } from './utils/weeklyTop';
 import type {
   CountryItem,
+  DailyUpdatesResponse,
   GenreItem,
   GenreShelf,
   MovieDetail,
@@ -36,6 +51,7 @@ import type {
   SavedMovieSnapshot,
   UserDataState,
   WatchHistoryEntry,
+  WeeklyTopResponse,
 } from './types/movie';
 import { CORE_GENRE_SHELF_DEFS, EXTRA_GENRE_SHELF_DEFS } from './utils/genreShelves';
 import {
@@ -73,7 +89,9 @@ function toSavedSnapshot(movie: MovieSummary): SavedMovieSnapshot {
 
 const TAB_ORDER: ActiveTab[] = [
   'explore',
+  'new-releases',
   'dubbed',
+  'ai-short',
   'recommendations',
   'history',
   'favorites',
@@ -130,6 +148,29 @@ export default function App() {
   const [dubbedTotalItems, setDubbedTotalItems] = useState<number>(0);
   const [dubbedLoading, setDubbedLoading] = useState<boolean>(true);
   const [dubbedError, setDubbedError] = useState<string | null>(null);
+
+  // Dedicated Chinese AI Short Films tab state
+  const [aiShortMovies, setAiShortMovies] = useState<MovieSummary[]>([]);
+  const [aiShortGenre, setAiShortGenre] = useState<string>('');
+  const [aiShortFormat, setAiShortFormat] = useState<AiShortFormatFilter>('all');
+  const [aiShortPage, setAiShortPage] = useState<number>(1);
+  const [aiShortTotalPages, setAiShortTotalPages] = useState<number>(1);
+  const [aiShortTotalItems, setAiShortTotalItems] = useState<number>(0);
+  const [aiShortTotalSourceVideos, setAiShortTotalSourceVideos] = useState<number>(0);
+  const [aiShortGroupedCount, setAiShortGroupedCount] = useState<number>(0);
+  const [aiShortLoading, setAiShortLoading] = useState<boolean>(true);
+  const [aiShortError, setAiShortError] = useState<string | null>(null);
+
+  // Daily Auto-Update New Releases & Notification state
+  const [dailyUpdates, setDailyUpdates] = useState<DailyUpdatesResponse | null>(null);
+  const [dailyUpdatesLoading, setDailyUpdatesLoading] = useState<boolean>(true);
+  const [dailyUpdatesRefreshing, setDailyUpdatesRefreshing] = useState<boolean>(false);
+  const [dailyUpdatesError, setDailyUpdatesError] = useState<string | null>(null);
+  const [dailyRefreshFeedback, setDailyRefreshFeedback] = useState<string | null>(null);
+
+  // Weekly Top Most-Watched Movies state
+  const [serverWeeklyTop, setServerWeeklyTop] = useState<WeeklyTopResponse | null>(null);
+  const [weeklyTopLoading, setWeeklyTopLoading] = useState<boolean>(true);
 
   // Theater / Player state
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
@@ -504,23 +545,244 @@ export default function App() {
     }
   }, [accessStatus, loadDubbedCatalog]);
 
-  const openMovie = useCallback(async (slug: string, episodeSlug?: string) => {
-    setSelectedSlug(slug);
-    setRequestedEpisodeSlug(episodeSlug);
-    setPipSession(null);
-    setDetailLoading(true);
-    setDetailError(null);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  const loadAiShortCatalog = useCallback(async () => {
+    if (accessStatus !== 'unlocked') return;
+    setAiShortLoading(true);
+    setAiShortError(null);
     try {
-      const detail = await fetchMovieDetail(slug);
-      setMovieDetail(detail);
+      const res = await fetchChineseAiShortMovies({
+        page: aiShortPage,
+        limit: 24,
+        category: aiShortGenre,
+        format: aiShortFormat,
+      });
+      setAiShortMovies(res.items);
+      setAiShortTotalPages(Math.max(1, res.pagination.totalPages));
+      setAiShortTotalItems(Math.max(res.items.length, res.pagination.totalItems || 0));
+      setAiShortTotalSourceVideos(res.totalSourceVideos ?? 0);
+      setAiShortGroupedCount(res.groupedSeriesCount ?? 0);
+      setRecommendationPool((prev) => {
+        const map = new Map(prev.map((m) => [m.slug, m]));
+        for (const item of res.items) {
+          if (!map.has(item.slug)) map.set(item.slug, item);
+        }
+        return Array.from(map.values());
+      });
     } catch (err) {
-      setDetailError(err instanceof Error ? err.message : 'Không thể tải thông tin chi tiết phim.');
-      setMovieDetail(null);
+      setAiShortError(
+        err instanceof Error ? err.message : 'Không thể tải danh sách phim ngắn AI Trung Quốc.'
+      );
     } finally {
-      setDetailLoading(false);
+      setAiShortLoading(false);
     }
-  }, []);
+  }, [accessStatus, aiShortPage, aiShortGenre, aiShortFormat]);
+
+  useEffect(() => {
+    if (accessStatus === 'unlocked') {
+      loadAiShortCatalog();
+    }
+  }, [accessStatus, loadAiShortCatalog]);
+
+  const dailyUpdatesRef = useRef<DailyUpdatesResponse | null>(null);
+  useEffect(() => {
+    dailyUpdatesRef.current = dailyUpdates;
+  }, [dailyUpdates]);
+
+  // Daily Auto-Update loader + periodic background poll & day-rollover check
+  const loadDailyUpdates = useCallback(async (silent = false) => {
+    if (accessStatus !== 'unlocked') return;
+    if (!silent && !dailyUpdatesRef.current) {
+      setDailyUpdatesLoading(true);
+      setDailyUpdatesError(null);
+    }
+    try {
+      const res = await fetchDailyUpdates();
+      dailyUpdatesRef.current = res;
+      setDailyUpdates(res);
+      setDailyUpdatesError(null);
+      setRecommendationPool((prev) => {
+        const map = new Map(prev.map((m) => [m.slug, m]));
+        for (const entry of res.entries) {
+          if (!map.has(entry.movie.slug)) map.set(entry.movie.slug, entry.movie);
+        }
+        return Array.from(map.values());
+      });
+    } catch (err) {
+      if (!silent) {
+        setDailyUpdatesError(
+          err instanceof Error ? err.message : 'Không thể kiểm tra danh sách phim mới hôm nay.'
+        );
+      }
+    } finally {
+      if (!silent) setDailyUpdatesLoading(false);
+    }
+  }, [accessStatus]);
+
+  useEffect(() => {
+    if (accessStatus !== 'unlocked') return;
+    loadDailyUpdates(false);
+
+    const intervalId = window.setInterval(() => {
+      loadDailyUpdates(true);
+    }, 15 * 60 * 1000);
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'hidden') return;
+      const latest = dailyUpdatesRef.current;
+      const todayKey = getVietnamDateKey();
+      if (
+        !latest ||
+        latest.dateKey !== todayKey ||
+        Date.now() - latest.lastUpdatedAt >= 15 * 60 * 1000
+      ) {
+        loadDailyUpdates(true);
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [accessStatus, loadDailyUpdates]);
+
+  const unreadNewInfo = useMemo(
+    () =>
+      computeUnreadNewMovies(
+        dailyUpdates?.entries ?? [],
+        userState.acknowledgedNewSlugs ?? []
+      ),
+    [dailyUpdates, userState.acknowledgedNewSlugs]
+  );
+
+  // Load rolling 7-day Top Watched ranking on unlock & merge with local browser watchHistory
+  useEffect(() => {
+    if (accessStatus !== 'unlocked') return;
+    let cancelled = false;
+    setWeeklyTopLoading(true);
+    fetchWeeklyTop(10)
+      .then((res) => {
+        if (!cancelled) setServerWeeklyTop(res);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setWeeklyTopLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accessStatus]);
+
+  const weeklyTop = useMemo(
+    () =>
+      mergeLocalHistoryWithWeeklyTop(
+        serverWeeklyTop,
+        userState.watchHistory,
+        userState.syncKey,
+        Date.now(),
+        10
+      ),
+    [serverWeeklyTop, userState.watchHistory, userState.syncKey]
+  );
+
+  const recordedWeeklyWatchRef = useRef<Map<string, number>>(new Map());
+  const movieDetailRef = useRef<MovieDetail | null>(null);
+  useEffect(() => {
+    movieDetailRef.current = movieDetail;
+  }, [movieDetail]);
+
+  const acknowledgeMovieSlugs = useCallback(
+    (slugs: string[]) => {
+      if (slugs.length === 0) return;
+      updateUserState((prev) => {
+        const current = prev.acknowledgedNewSlugs ?? [];
+        const currentSet = new Set(current);
+        if (slugs.every((s) => currentSet.has(s))) {
+          return prev;
+        }
+        return {
+          ...prev,
+          acknowledgedNewSlugs: Array.from(new Set([...current, ...slugs])).slice(-400),
+          updatedAt: Date.now(),
+        };
+      });
+    },
+    [updateUserState]
+  );
+
+  const handleMarkAllNewRead = useCallback(() => {
+    if (!dailyUpdates) return;
+    const allNewTodaySlugs = dailyUpdates.entries
+      .filter((e) => e.isNewToday)
+      .map((e) => e.movie.slug);
+    acknowledgeMovieSlugs(allNewTodaySlugs);
+    setDailyRefreshFeedback('Đã đánh dấu đã xem toàn bộ phim mới hôm nay.');
+  }, [dailyUpdates, acknowledgeMovieSlugs]);
+
+  const handleRefreshDailyUpdates = useCallback(async () => {
+    if (dailyUpdatesRefreshing) return;
+    setDailyUpdatesRefreshing(true);
+    setDailyRefreshFeedback(null);
+    setDailyUpdatesError(null);
+    try {
+      const { snapshot, addedNowCount } = await refreshDailyUpdatesApi();
+      setDailyUpdates(snapshot);
+      const timeLabel = formatVietnamTimeHHMM(snapshot.lastUpdatedAt);
+      setDailyRefreshFeedback(
+        addedNowCount > 0
+          ? `Đã cập nhật lúc ${timeLabel} · Phát hiện thêm ${addedNowCount} phim / tập mới.`
+          : `Đã kiểm tra lúc ${timeLabel} · Danh sách đang là mới nhất.`
+      );
+    } catch (err) {
+      setDailyRefreshFeedback(
+        err instanceof Error ? err.message : 'Không thể kiểm tra phim mới lúc này.'
+      );
+    } finally {
+      setDailyUpdatesRefreshing(false);
+    }
+  }, [dailyUpdatesRefreshing]);
+
+  const openMovie = useCallback(
+    async (slug: string, episodeSlug?: string) => {
+      acknowledgeMovieSlugs([slug]);
+      setSelectedSlug(slug);
+      setRequestedEpisodeSlug(episodeSlug);
+      setPipSession(null);
+      setDetailLoading(true);
+      setDetailError(null);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      try {
+        const detail = await fetchMovieDetail(slug);
+        setMovieDetail(detail);
+        const epSlug = episodeSlug || detail.servers?.[0]?.episodes?.[0]?.slug || '';
+        const watchTrackKey = `${detail.slug}::${epSlug}`;
+        const lastPing = recordedWeeklyWatchRef.current.get(watchTrackKey) ?? 0;
+        if (Date.now() - lastPing >= 5 * 60 * 1000) {
+          recordedWeeklyWatchRef.current.set(watchTrackKey, Date.now());
+          recordWeeklyWatchApi({
+            slug: detail.slug,
+            viewerKey: userState.syncKey,
+            episodeSlug: epSlug,
+            progressSeconds: 0,
+            movie: detail,
+          })
+            .then((updated) => setServerWeeklyTop(updated))
+            .catch(() => {});
+        }
+      } catch (err) {
+        setDetailError(
+          err instanceof Error ? err.message : 'Không thể tải thông tin chi tiết phim.'
+        );
+        setMovieDetail(null);
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [acknowledgeMovieSlugs, userState.syncKey]
+  );
 
   const recommendations = useMemo(
     () =>
@@ -628,8 +890,45 @@ export default function App() {
           updatedAt: Date.now(),
         };
       });
+
+      const watchTrackKey = `${entry.slug}::${entry.episodeSlug}`;
+      const lastPing = recordedWeeklyWatchRef.current.get(watchTrackKey) ?? 0;
+      if (Date.now() - lastPing >= 60 * 1000) {
+        recordedWeeklyWatchRef.current.set(watchTrackKey, Date.now());
+        const detail = movieDetailRef.current;
+        const summary: MovieSummary =
+          detail && detail.slug === entry.slug
+            ? detail
+            : {
+                id: entry.slug,
+                name: entry.name,
+                originName: entry.originName,
+                slug: entry.slug,
+                type: entry.slug.startsWith('yt-ai--') ? 'ai-short' : 'series',
+                posterUrl: entry.posterUrl,
+                thumbUrl: entry.thumbUrl,
+                year: entry.year,
+                quality: entry.quality,
+                lang: entry.slug.startsWith('yt-ai--') ? 'Phim Ngắn AI' : 'Vietsub',
+                time: '',
+                episodeCurrent: entry.episodeName,
+                categories: entry.categories,
+                countries: entry.countries,
+                rating: { voteAverage: 0, voteCount: 0 },
+                modifiedAt: '',
+              };
+        recordWeeklyWatchApi({
+          slug: entry.slug,
+          viewerKey: userState.syncKey,
+          episodeSlug: entry.episodeSlug,
+          progressSeconds: entry.progressSeconds,
+          movie: summary,
+        })
+          .then((updated) => setServerWeeklyTop(updated))
+          .catch(() => {});
+      }
     },
-    [updateUserState]
+    [updateUserState, userState.syncKey]
   );
 
   const handleToggleLike = (movie: MovieSummary) => {
@@ -792,6 +1091,7 @@ export default function App() {
         }}
         theme={userState.theme}
         onToggleTheme={handleToggleTheme}
+        newMoviesCount={unreadNewInfo.unreadCount}
         historyCount={userState.watchHistory.length}
         favoritesCount={userState.watchlist.length + userState.likedMovies.length}
       />
@@ -836,6 +1136,8 @@ export default function App() {
               onLoadExtraShelves={handleLoadExtraShelves}
               onRetryGenreShelves={loadCoreGenreShelves}
               watchHistory={userState.watchHistory}
+              weeklyTop={weeklyTop}
+              weeklyTopLoading={weeklyTopLoading}
               loading={catalogLoading}
               error={catalogError}
               page={page}
@@ -893,6 +1195,21 @@ export default function App() {
                     onToggleWatchlist={() => handleToggleWatchlist(movieDetail)}
                   />
                 )
+              ) : activeTab === 'new-releases' ? (
+                <NewReleasesView
+                  data={dailyUpdates}
+                  loading={dailyUpdatesLoading}
+                  refreshing={dailyUpdatesRefreshing}
+                  error={dailyUpdatesError}
+                  refreshFeedback={dailyRefreshFeedback}
+                  acknowledgedSlugs={userState.acknowledgedNewSlugs ?? []}
+                  unreadCount={unreadNewInfo.unreadCount}
+                  watchHistory={userState.watchHistory}
+                  onRefreshNow={handleRefreshDailyUpdates}
+                  onMarkAllRead={handleMarkAllNewRead}
+                  onRetry={() => loadDailyUpdates(false)}
+                  onSelectMovie={openMovie}
+                />
               ) : activeTab === 'dubbed' ? (
                 <DubbedMoviesView
                   genres={genres}
@@ -925,6 +1242,41 @@ export default function App() {
                     window.scrollTo({ top: 0, behavior: 'smooth' });
                   }}
                   onRetry={loadDubbedCatalog}
+                  onSelectMovie={openMovie}
+                />
+              ) : activeTab === 'ai-short' ? (
+                <AiShortMoviesView
+                  genres={genres}
+                  filtersLoading={filtersLoading}
+                  selectedGenre={aiShortGenre}
+                  selectedFormat={aiShortFormat}
+                  onSelectGenre={(slug) => {
+                    setAiShortGenre(slug);
+                    setAiShortPage(1);
+                  }}
+                  onSelectFormat={(fmt) => {
+                    setAiShortFormat(fmt);
+                    setAiShortPage(1);
+                  }}
+                  onClearFilters={() => {
+                    setAiShortGenre('');
+                    setAiShortFormat('all');
+                    setAiShortPage(1);
+                  }}
+                  movies={aiShortMovies}
+                  watchHistory={userState.watchHistory}
+                  loading={aiShortLoading}
+                  error={aiShortError}
+                  page={aiShortPage}
+                  totalPages={aiShortTotalPages}
+                  totalItems={aiShortTotalItems}
+                  totalSourceVideos={aiShortTotalSourceVideos}
+                  groupedSeriesCount={aiShortGroupedCount}
+                  onPageChange={(nextPage) => {
+                    setAiShortPage(nextPage);
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  onRetry={loadAiShortCatalog}
                   onSelectMovie={openMovie}
                 />
               ) : activeTab === 'recommendations' ? (

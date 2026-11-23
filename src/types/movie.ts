@@ -12,6 +12,12 @@ export interface MovieRating {
   voteCount: number;
 }
 
+export interface MovieGroupPart {
+  videoId: string;
+  label: string;
+  title: string;
+}
+
 export interface MovieSummary {
   id: string;
   name: string;
@@ -29,6 +35,7 @@ export interface MovieSummary {
   countries: TaxonomyRef[];
   rating: MovieRating;
   modifiedAt: string;
+  groupParts?: MovieGroupPart[];
 }
 
 export interface EpisodeItem {
@@ -100,6 +107,7 @@ export interface UserDataState {
   likedMovies: SavedMovieSnapshot[];
   dislikedSlugs: string[];
   watchlist: SavedMovieSnapshot[];
+  acknowledgedNewSlugs?: string[];
   updatedAt: number;
 }
 
@@ -129,6 +137,34 @@ export interface CatalogResponse {
     totalItemsPerPage: number;
   };
   titlePage?: string;
+  totalSourceVideos?: number;
+  groupedSeriesCount?: number;
+}
+
+export type DailyMovieCategory = 'regular' | 'dubbed' | 'ai-short';
+
+export interface DailyNewMovieEntry {
+  movie: MovieSummary;
+  sourceCategory: DailyMovieCategory;
+  discoveredAt: number;
+  isNewToday: boolean;
+}
+
+export interface DailyUpdatesSnapshot {
+  dateKey: string;
+  lastUpdatedAt: number;
+  nextAutoCheckAt: number;
+  newlyAddedCount: number;
+  entries: DailyNewMovieEntry[];
+  knownSignatures: Record<string, string>;
+}
+
+export interface DailyUpdatesResponse {
+  dateKey: string;
+  lastUpdatedAt: number;
+  nextAutoCheckAt: number;
+  newlyAddedCount: number;
+  entries: DailyNewMovieEntry[];
 }
 
 export interface GenreShelf {
@@ -151,3 +187,30 @@ export interface PipPlayerSession {
   playbackRate: number;
 }
 
+export interface WeeklyTopMovieEntry {
+  rank: number;
+  movie: MovieSummary;
+  weeklyViews: number;
+  uniqueViewers: number;
+  episodesWatchedCount: number;
+  totalMinutesWatched: number;
+  lastWatchedAt: number;
+}
+
+export interface WeeklyTopResponse {
+  windowDays: number;
+  weekStartAt: number;
+  generatedAt: number;
+  totalTrackedViews: number;
+  items: WeeklyTopMovieEntry[];
+}
+
+export interface WeeklyWatchEventRecord {
+  slug: string;
+  viewerKey: string;
+  movie: MovieSummary;
+  watchedEpisodes: string[];
+  viewHits: number;
+  progressSeconds: number;
+  lastWatchedAt: number;
+}

@@ -35,6 +35,7 @@ export function createDefaultUserState(syncKey?: string): UserDataState {
     likedMovies: [],
     dislikedSlugs: [],
     watchlist: [],
+    acknowledgedNewSlugs: [],
     updatedAt: Date.now(),
   };
 }
@@ -124,6 +125,12 @@ export function normalizeUserState(raw: Partial<UserDataState> | null | undefine
     ? Array.from(new Set(raw.dislikedSlugs.filter((s): s is string => typeof s === 'string' && s.length > 0))).slice(0, 200)
     : [];
 
+  const acknowledgedNewSlugs = Array.isArray(raw.acknowledgedNewSlugs)
+    ? Array.from(
+        new Set(raw.acknowledgedNewSlugs.filter((s): s is string => typeof s === 'string' && s.length > 0))
+      ).slice(-400)
+    : [];
+
   return {
     version: 1,
     syncKey,
@@ -133,6 +140,7 @@ export function normalizeUserState(raw: Partial<UserDataState> | null | undefine
     likedMovies: normalizeSaved(raw.likedMovies),
     dislikedSlugs,
     watchlist: normalizeSaved(raw.watchlist),
+    acknowledgedNewSlugs,
     updatedAt: Number(raw.updatedAt) || Date.now(),
   };
 }
@@ -185,6 +193,9 @@ export function mergeUserStates(local: UserDataState, remote: UserDataState): Us
     likedMovies: mergeSavedList(local.likedMovies, remote.likedMovies),
     dislikedSlugs: Array.from(new Set([...local.dislikedSlugs, ...remote.dislikedSlugs])).slice(0, 200),
     watchlist: mergeSavedList(local.watchlist, remote.watchlist),
+    acknowledgedNewSlugs: Array.from(
+      new Set([...(local.acknowledgedNewSlugs ?? []), ...(remote.acknowledgedNewSlugs ?? [])])
+    ).slice(-400),
     updatedAt: Math.max(local.updatedAt, remote.updatedAt, Date.now()),
   };
 }

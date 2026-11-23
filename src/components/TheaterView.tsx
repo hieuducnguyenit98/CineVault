@@ -5,6 +5,7 @@ import {
   ArrowRight,
   Bookmark,
   Check,
+  ExternalLink,
   Keyboard,
   Maximize2,
   Mic,
@@ -569,6 +570,13 @@ export function TheaterView({
   };
 
   const trailerEmbed = getYoutubeEmbedUrl(movie.trailerUrl);
+  const youtubeEmbedIdMatch = activeEpisode?.linkEmbed?.match(
+    /youtube\.com\/embed\/([A-Za-z0-9_-]{6,20})/
+  );
+  const isYoutubeDirectPlayer = Boolean(youtubeEmbedIdMatch);
+  const activeYoutubeWatchUrl = youtubeEmbedIdMatch
+    ? `https://www.youtube.com/watch?v=${youtubeEmbedIdMatch[1]}`
+    : movie.trailerUrl;
 
   const metaLine = [
     String(movie.year),
@@ -633,14 +641,26 @@ export function TheaterView({
               </button>
             )}
 
-            {trailerEmbed && (
-              <button
-                type="button"
-                onClick={() => setPlayerMode(playerMode === 'trailer' ? 'embed' : 'trailer')}
-                className="btn-cinema-surface inline-flex min-h-[44px] items-center gap-2 rounded-xl px-4 py-2 text-xs font-medium cursor-pointer"
+            {isYoutubeDirectPlayer && activeYoutubeWatchUrl ? (
+              <a
+                href={activeYoutubeWatchUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-cinema-surface inline-flex min-h-[44px] items-center gap-2 rounded-xl px-4 py-2 text-xs font-medium"
               >
-                <span>{playerMode === 'trailer' ? 'Quay lại phim chính' : 'Xem Trailer'}</span>
-              </button>
+                <ExternalLink className="h-4 w-4 text-[#9A7418] dark:text-[#D4AF37]" />
+                <span>Mở trên YouTube</span>
+              </a>
+            ) : (
+              trailerEmbed && (
+                <button
+                  type="button"
+                  onClick={() => setPlayerMode(playerMode === 'trailer' ? 'embed' : 'trailer')}
+                  className="btn-cinema-surface inline-flex min-h-[44px] items-center gap-2 rounded-xl px-4 py-2 text-xs font-medium cursor-pointer"
+                >
+                  <span>{playerMode === 'trailer' ? 'Quay lại phim chính' : 'Xem Trailer'}</span>
+                </button>
+              )
             )}
           </div>
         )}
@@ -802,6 +822,18 @@ export function TheaterView({
                 <PictureInPicture className="h-3.5 w-3.5" />
                 <span className="hidden md:inline">PiP Ngoài</span>
               </button>
+            )}
+
+            {isYoutubeDirectPlayer && activeYoutubeWatchUrl && (
+              <a
+                href={activeYoutubeWatchUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-white/10 px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-white/20 transition-colors"
+              >
+                <ExternalLink className="h-3.5 w-3.5 text-[#F0D075]" />
+                <span className="hidden sm:inline">Mở trên YouTube</span>
+              </a>
             )}
 
             <button
