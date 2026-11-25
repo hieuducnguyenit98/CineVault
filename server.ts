@@ -15,7 +15,9 @@ import type {
 } from './src/types/movie.ts';
 import {
   DEFAULT_ACCESS_CODE_DIGEST,
+  getStableAccessSecret,
   hashAccessCode,
+  parseCookieHeader,
   signAccessToken,
   verifyAccessCode,
   verifySignedAccessToken,
@@ -81,32 +83,28 @@ const DAILY_UPDATES_FILE = path.join(DATA_DIR, 'daily-updates.json');
 const WEEKLY_VIEWS_FILE = path.join(DATA_DIR, 'weekly-views.json');
 const ACCESS_SECRET_FILE = path.join(DATA_DIR, '.access-secret');
 
+function getExpectedAccessDigest(): string {
+  const override = process.env.ACCESS_CODE?.trim();
+  return override ? hashAccessCode(override) : DEFAULT_ACCESS_CODE_DIGEST;
+}
+
 function getOrCreateAccessSecret(): string {
   const envSecret = process.env.ACCESS_TOKEN_SECRET?.trim();
   if (envSecret && envSecret.length >= 16) {
     return envSecret;
   }
+  const stableSecret = getStableAccessSecret(undefined, getExpectedAccessDigest());
   try {
-    if (fs.existsSync(ACCESS_SECRET_FILE)) {
-      const existing = fs.readFileSync(ACCESS_SECRET_FILE, 'utf-8').trim();
-      if (existing.length >= 32) {
-        return existing;
-      }
-    }
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    const generated = crypto.randomBytes(32).toString('hex');
-    fs.writeFileSync(ACCESS_SECRET_FILE, generated, { encoding: 'utf-8', mode: 0o600 });
-    return generated;
+    if (!fs.existsSync(ACCESS_SECRET_FILE)) {
+      fs.writeFileSync(ACCESS_SECRET_FILE, stableSecret, { encoding: 'utf-8', mode: 0o600 });
+    }
   } catch {
-    return crypto.createHash('sha256').update(DEFAULT_ACCESS_CODE_DIGEST).digest('hex');
+    // Ephemeral or read-only filesystems fall back to stableSecret
   }
-}
-
-function getExpectedAccessDigest(): string {
-  const override = process.env.ACCESS_CODE?.trim();
-  return override ? hashAccessCode(override) : DEFAULT_ACCESS_CODE_DIGEST;
+  return stableSecret;
 }
 
 const accessFailures = new Map<string, { count: number; resetAt: number }>();
@@ -361,6 +359,14 @@ async function startServer() {
     if (auth && auth.toLowerCase().startsWith('bearer ')) {
       return auth.slice(7).trim();
     }
+    const cookieHeader = req.header('cookie');
+    if (cookieHeader) {
+      const parsed = parseCookieHeader(cookieHeader);
+      const cookieToken = parsed.cinevault_access_token || parsed.cv_token;
+      if (cookieToken && cookieToken.trim()) {
+        return cookieToken.trim();
+      }
+    }
     return '';
   };
 
@@ -382,8 +388,18 @@ async function startServer() {
   app.get('/api/access/session', (req, res) => {
     const token = extractAccessToken(req);
     if (verifySignedAccessToken(token, accessSecret)) {
+      const isHttps = req.secure || req.header('x-forwarded-proto') === 'https';
+      // Refresh persistent 1-year cookie on active session check
+      res.setHeader(
+        'Set-Cookie',
+        `cinevault_access_token=${encodeURIComponent(token)}; Path=/; Max-Age=${365 * 24 * 60 * 60}; SameSite=Lax${isHttps ? '; Secure' : ''}`
+      );
       res.json({ unlocked: true });
     } else {
+      res.setHeader(
+        'Set-Cookie',
+        'cinevault_access_token=; Path=/; Max-Age=0; SameSite=Lax'
+      );
       res.status(401).json({ unlocked: false });
     }
   });
@@ -413,9 +429,15 @@ async function startServer() {
     }
 
     accessFailures.delete(clientIp);
+    const token = signAccessToken(accessSecret, now);
+    const isHttps = req.secure || req.header('x-forwarded-proto') === 'https';
+    res.setHeader(
+      'Set-Cookie',
+      `cinevault_access_token=${encodeURIComponent(token)}; Path=/; Max-Age=${365 * 24 * 60 * 60}; SameSite=Lax${isHttps ? '; Secure' : ''}`
+    );
     res.json({
       unlocked: true,
-      token: signAccessToken(accessSecret, now),
+      token,
     });
   });
 

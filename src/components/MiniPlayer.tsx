@@ -14,6 +14,14 @@ import {
   X,
 } from 'lucide-react';
 import type { EpisodeItem, PipPlayerSession, WatchHistoryEntry } from '../types/movie';
+import {
+  AUTO_PLAY_COUNTDOWN_SECONDS,
+  appendYoutubeJsApiParams,
+  canAutoPlayNextEpisode,
+  computeCountdownProgress,
+  isYoutubeEndedPostMessage,
+  loadAutoPlayPreference,
+} from '../utils/autoPlayNext';
 import { formatDurationSeconds } from '../utils/movieNormalizer';
 import { clampSeekTime } from '../utils/playerShortcuts';
 import { getNextEpisodeInfo } from '../utils/recommendationEngine';
@@ -36,6 +44,11 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
   const [isMuted, setIsMuted] = useState<boolean>(session.isMuted ?? false);
   const [isNativePip, setIsNativePip] = useState<boolean>(false);
   const [isHovered, setIsHovered] = useState<boolean>(false);
+  const [autoPlayEnabled] = useState<boolean>(() => loadAutoPlayPreference(true));
+  const [autoPlayCountdown, setAutoPlayCountdown] = useState<{
+    targetEpisode: EpisodeItem;
+    secondsLeft: number;
+  } | null>(null);
 
   // Position state for optional dragging
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
@@ -44,9 +57,11 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastSavedAtRef = useRef<number>(0);
   const currentTimeRef = useRef<number>(session.currentTime || 0);
   const durationRef = useRef<number>(session.duration || 0);
+  const initialEpisodeSlugRef = useRef<string>(session.episodeSlug);
 
   const activeServer = movie.servers[serverIdx] ?? movie.servers[0];
   const activeEpisode: EpisodeItem | undefined = useMemo(() => {
@@ -106,8 +121,11 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
     const proxiedUrl = `/api/stream/hls?url=${encodeURIComponent(activeEpisode.linkM3u8)}`;
 
     const resumePlayback = () => {
-      if (session.currentTime > 2 && videoEl.duration > session.currentTime) {
+      const isInitialEpisode = activeEpisode.slug === initialEpisodeSlugRef.current;
+      if (isInitialEpisode && session.currentTime > 2 && videoEl.duration > session.currentTime) {
         videoEl.currentTime = session.currentTime;
+      } else {
+        videoEl.currentTime = 0;
       }
       videoEl.muted = isMuted;
       videoEl.playbackRate = session.playbackRate || 1;
@@ -155,7 +173,7 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
       videoEl.removeEventListener('enterpictureinpicture', onEnterPip);
       videoEl.removeEventListener('leavepictureinpicture', onLeavePip);
     };
-  }, [activeEpisode?.linkEmbed, activeEpisode?.linkM3u8, playerMode, session.currentTime, session.playbackRate]);
+  }, [activeEpisode?.linkEmbed, activeEpisode?.linkM3u8, activeEpisode?.slug, playerMode, session.currentTime, session.playbackRate]);
 
   // Handle Dragging
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -269,10 +287,54 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
     onClose();
   };
 
+  const autoPlayEligibility = useMemo(
+    () =>
+      canAutoPlayNextEpisode({
+        movieType: movie.type,
+        episodes: activeServer?.episodes ?? [],
+        currentEpisodeSlug: activeEpisode?.slug ?? '',
+        autoPlayEnabled,
+        playerMode,
+      }),
+    [movie.type, activeServer?.episodes, activeEpisode?.slug, autoPlayEnabled, playerMode]
+  );
+
+  const startAutoPlayCountdown = useCallback(() => {
+    if (!autoPlayEligibility.eligible || !autoPlayEligibility.nextEpisode) return;
+    setAutoPlayCountdown({
+      targetEpisode: autoPlayEligibility.nextEpisode,
+      secondsLeft: AUTO_PLAY_COUNTDOWN_SECONDS,
+    });
+  }, [autoPlayEligibility]);
+
+  useEffect(() => {
+    setAutoPlayCountdown(null);
+  }, [activeEpisode?.slug, serverIdx, playerMode]);
+
+  useEffect(() => {
+    if (!autoPlayCountdown) return;
+    if (autoPlayCountdown.secondsLeft <= 0) {
+      const target = autoPlayCountdown.targetEpisode;
+      setAutoPlayCountdown(null);
+      setCurrentEpisodeSlug(target.slug);
+      setCurrentTime(0);
+      currentTimeRef.current = 0;
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setAutoPlayCountdown((prev) =>
+        prev ? { ...prev, secondsLeft: Math.max(0, prev.secondsLeft - 1) } : null
+      );
+    }, 1000);
+    return () => window.clearTimeout(id);
+  }, [autoPlayCountdown]);
+
   const handleNextEpisode = () => {
     if (!nextEpisodeInfo.nextEpisode) return;
+    setAutoPlayCountdown(null);
     setCurrentEpisodeSlug(nextEpisodeInfo.nextEpisode.slug);
     setCurrentTime(0);
+    currentTimeRef.current = 0;
   };
 
   const getYoutubeEmbedUrl = (url: string | null): string | null => {
@@ -294,6 +356,27 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
   };
 
   const trailerEmbed = getYoutubeEmbedUrl(movie.trailerUrl);
+  const isYoutubeDirectEmbed = Boolean(
+    activeEpisode?.linkEmbed && /youtube\.com\/embed\/([A-Za-z0-9_-]{6,20})/.test(activeEpisode.linkEmbed)
+  );
+  const embedIframeSrc = useMemo(() => {
+    if (!activeEpisode?.linkEmbed) return '';
+    return appendYoutubeJsApiParams(
+      activeEpisode.linkEmbed,
+      typeof window !== 'undefined' ? window.location.origin : undefined
+    );
+  }, [activeEpisode?.linkEmbed]);
+
+  useEffect(() => {
+    if (playerMode !== 'embed' || !isYoutubeDirectEmbed) return;
+    const onMessage = (event: MessageEvent) => {
+      if (isYoutubeEndedPostMessage(event.data, event.origin)) {
+        startAutoPlayCountdown();
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [playerMode, isYoutubeDirectEmbed, startAutoPlayCountdown]);
 
   const stylePosition = position
     ? { left: `${position.x}px`, top: `${position.y}px`, right: 'auto', bottom: 'auto' }
@@ -388,11 +471,17 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
               playsInline
               poster={movie.thumbUrl || movie.posterUrl}
               onTimeUpdate={handleTimeUpdate}
-              onPlay={() => setIsPlaying(true)}
+              onPlay={() => {
+                setIsPlaying(true);
+                if (autoPlayCountdown) {
+                  setAutoPlayCountdown(null);
+                }
+              }}
               onPause={() => setIsPlaying(false)}
               onEnded={() => {
                 setIsPlaying(false);
                 saveProgress(currentTimeRef.current, durationRef.current);
+                startAutoPlayCountdown();
               }}
               onVolumeChange={() => {
                 if (videoRef.current) {
@@ -404,9 +493,30 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
             />
           ) : activeEpisode.linkEmbed ? (
             <iframe
-              src={activeEpisode.linkEmbed}
+              ref={iframeRef}
+              src={embedIframeSrc}
               title={`${movie.name} - ${activeEpisode.name}`}
               allow="autoplay; fullscreen; picture-in-picture"
+              onLoad={() => {
+                if (isYoutubeDirectEmbed && iframeRef.current?.contentWindow) {
+                  try {
+                    iframeRef.current.contentWindow.postMessage(
+                      JSON.stringify({ event: 'listening' }),
+                      '*'
+                    );
+                    iframeRef.current.contentWindow.postMessage(
+                      JSON.stringify({
+                        event: 'command',
+                        func: 'addEventListener',
+                        args: ['onStateChange'],
+                      }),
+                      '*'
+                    );
+                  } catch {
+                    // Ignore cross-origin postMessage failures
+                  }
+                }
+              }}
               className="h-full w-full border-0"
             />
           ) : (
@@ -417,6 +527,63 @@ export function MiniPlayer({ session, onExpand, onClose, onProgressSave }: MiniP
         ) : (
           <div className="flex h-full w-full items-center justify-center p-4 text-center text-xs text-zinc-400">
             Chưa có tập phát.
+          </div>
+        )}
+
+        {/* MiniPlayer 10s Auto-Play Next Countdown Overlay */}
+        {autoPlayCountdown && (
+          <div
+            data-testid="mini-autoplay-overlay"
+            role="region"
+            aria-label="Tự động chuyển tập trên PiP"
+            className="absolute inset-0 z-20 flex flex-col justify-between bg-[#09090B]/92 p-3 text-zinc-100 backdrop-blur-sm"
+          >
+            <div className="space-y-1">
+              <p className="text-[11px] font-semibold text-[#F0D075]">
+                Tập tiếp theo · Phát sau{' '}
+                <span className="font-mono tabular-nums">{autoPlayCountdown.secondsLeft}s</span>
+              </p>
+              <p className="truncate text-xs font-bold text-white">
+                {autoPlayCountdown.targetEpisode.name}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <div className="h-1 w-full overflow-hidden rounded-full bg-white/15">
+                <div
+                  className="h-full bg-[#D4AF37] transition-[width] duration-700 ease-linear"
+                  style={{
+                    width: `${computeCountdownProgress(
+                      autoPlayCountdown.secondsLeft,
+                      AUTO_PLAY_COUNTDOWN_SECONDS
+                    )}%`,
+                  }}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = autoPlayCountdown.targetEpisode;
+                    setAutoPlayCountdown(null);
+                    setCurrentEpisodeSlug(target.slug);
+                    setCurrentTime(0);
+                    currentTimeRef.current = 0;
+                  }}
+                  className="btn-cinema-gold inline-flex flex-1 items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold cursor-pointer"
+                >
+                  <Play className="h-3 w-3 fill-current" />
+                  <span>Phát ngay</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutoPlayCountdown(null)}
+                  className="inline-flex items-center justify-center rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 hover:bg-white/20 cursor-pointer"
+                >
+                  Hủy
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

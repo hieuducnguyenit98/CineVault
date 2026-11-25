@@ -203,21 +203,29 @@ export default function App() {
     const stored = loadStoredAccessToken();
     if (!stored) {
       setAccessStatus('locked');
-    } else {
-      let cancelled = false;
-      checkAccessSessionApi(stored).then((valid) => {
-        if (cancelled) return;
-        if (valid) {
-          setAccessStatus('unlocked');
-        } else {
-          clearStoredAccessToken();
-          setAccessStatus('locked');
-        }
-      });
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
+
+    let cancelled = false;
+    checkAccessSessionApi(stored).then((res) => {
+      if (cancelled) return;
+      if (res.valid) {
+        setAccessStatus('unlocked');
+      } else if (res.isUnauthorized) {
+        // Explicit 401: access code was changed or token revoked
+        clearStoredAccessToken();
+        setAccessStatus('locked');
+      } else {
+        // Network error, 502/503/504 while Render/server is cold starting from sleep:
+        // KEEP the token! Do NOT wipe user credentials when backend is waking up.
+        // Optimistically unlock so user is not stuck behind the lock screen.
+        setAccessStatus('unlocked');
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1069,8 +1077,8 @@ export default function App() {
       <AccessGate
         theme={userState.theme}
         onToggleTheme={handleToggleTheme}
-        onUnlocked={(token) => {
-          saveStoredAccessToken(token);
+        onUnlocked={(token, remember = true) => {
+          saveStoredAccessToken(token, remember);
           setAccessStatus('unlocked');
         }}
       />

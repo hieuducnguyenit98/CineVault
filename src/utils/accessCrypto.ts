@@ -65,3 +65,36 @@ export function verifySignedAccessToken(token: string, secret: string): boolean 
   }
   return crypto.timingSafeEqual(providedBuf, expectedBuf);
 }
+
+export function getStableAccessSecret(
+  customSecret?: string,
+  expectedDigestHex = DEFAULT_ACCESS_CODE_DIGEST
+): string {
+  if (customSecret && customSecret.trim().length >= 16) {
+    return customSecret.trim();
+  }
+  return crypto
+    .createHash('sha256')
+    .update(`cinevault-app-stable-secret-v1:${expectedDigestHex}`)
+    .digest('hex');
+}
+
+export function parseCookieHeader(cookieHeader?: string | null): Record<string, string> {
+  if (!cookieHeader) return {};
+  const cookies: Record<string, string> = {};
+  const items = cookieHeader.split(';');
+  for (const item of items) {
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim();
+    try {
+      cookies[key] = decodeURIComponent(val);
+    } catch {
+      cookies[key] = val;
+    }
+  }
+  return cookies;
+}

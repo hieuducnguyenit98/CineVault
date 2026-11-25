@@ -7,12 +7,13 @@ import { normalizeAccessCodeInput, validateAccessCodeInput } from '../utils/acce
 interface AccessGateProps {
   theme: ThemeMode;
   onToggleTheme: () => void;
-  onUnlocked: (token: string) => void;
+  onUnlocked: (token: string, remember?: boolean) => void;
 }
 
 export function AccessGate({ theme, onToggleTheme, onUnlocked }: AccessGateProps) {
   const [code, setCode] = useState('');
   const [showCode, setShowCode] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,7 +33,7 @@ export function AccessGate({ theme, onToggleTheme, onUnlocked }: AccessGateProps
       const normalized = normalizeAccessCodeInput(code);
       const res = await verifyAccessCodeApi(normalized);
       if (res.unlocked && res.token) {
-        onUnlocked(res.token);
+        onUnlocked(res.token, rememberMe);
       } else {
         setError('Mã truy cập không chính xác. Vui lòng kiểm tra lại.');
       }
@@ -140,6 +141,16 @@ export function AccessGate({ theme, onToggleTheme, onUnlocked }: AccessGateProps
                 </button>
               </div>
             </div>
+
+            <label className="flex items-start gap-2.5 text-xs leading-relaxed text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-zinc-300 text-[#9A7418] focus:ring-[#9A7418] dark:border-zinc-700 dark:bg-zinc-900 dark:focus:ring-[#D4AF37] accent-[#D4AF37] cursor-pointer"
+              />
+              <span>Ghi nhớ mở khóa trên trình duyệt này (không bắt nhập lại ở những lần truy cập sau)</span>
+            </label>
 
             {error && (
               <p

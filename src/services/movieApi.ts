@@ -53,19 +53,56 @@ export function verifyAccessCodeApi(code: string): Promise<{ unlocked: boolean; 
   });
 }
 
-export async function checkAccessSessionApi(token: string): Promise<boolean> {
-  try {
-    const res = await fetch('/api/access/session', {
-      headers: {
-        'X-Access-Token': token,
-      },
-    });
-    if (!res.ok) return false;
-    const data = (await res.json()) as { unlocked?: boolean };
-    return Boolean(data?.unlocked);
-  } catch {
-    return false;
+export interface AccessSessionCheckResult {
+  valid: boolean;
+  isUnauthorized?: boolean;
+  isNetworkError?: boolean;
+}
+
+export async function checkAccessSessionApi(
+  token: string,
+  retries = 2
+): Promise<AccessSessionCheckResult> {
+  const cleanToken = token.trim();
+  if (!cleanToken) {
+    return { valid: false, isUnauthorized: true };
   }
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch('/api/access/session', {
+        headers: {
+          'X-Access-Token': cleanToken,
+        },
+      });
+
+      if (res.ok) {
+        const data = (await res.json()) as { unlocked?: boolean };
+        if (data?.unlocked) {
+          return { valid: true };
+        }
+      }
+
+      if (res.status === 401) {
+        return { valid: false, isUnauthorized: true };
+      }
+
+      // Transient gateway/server wakeup (502, 503, 504)
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+        continue;
+      }
+      return { valid: false, isNetworkError: true };
+    } catch {
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+        continue;
+      }
+      return { valid: false, isNetworkError: true };
+    }
+  }
+
+  return { valid: false, isNetworkError: true };
 }
 
 export function fetchHeroMovies(): Promise<{ movies: MovieSummary[]; dateKey: string }> {

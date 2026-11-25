@@ -22,8 +22,19 @@ import {
   ThumbsUp,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
 import type { EpisodeItem, MovieDetail, MovieSummary, PipPlayerSession, WatchHistoryEntry } from '../types/movie';
+import {
+  AUTO_PLAY_COUNTDOWN_SECONDS,
+  appendYoutubeJsApiParams,
+  canAutoPlayNextEpisode,
+  computeCountdownProgress,
+  isSeriesMovie,
+  isYoutubeEndedPostMessage,
+  loadAutoPlayPreference,
+  saveAutoPlayPreference,
+} from '../utils/autoPlayNext';
 import {
   findPreferredNarrationServerIndex,
   formatDurationSeconds,
@@ -113,6 +124,11 @@ export function TheaterView({
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isInNativePip, setIsInNativePip] = useState<boolean>(false);
   const [showShortcutHelp, setShowShortcutHelp] = useState<boolean>(false);
+  const [autoPlayEnabled, setAutoPlayEnabled] = useState<boolean>(() => loadAutoPlayPreference(true));
+  const [autoPlayCountdown, setAutoPlayCountdown] = useState<{
+    targetEpisode: EpisodeItem;
+    secondsLeft: number;
+  } | null>(null);
   const [osdNotice, setOsdNotice] = useState<{
     id: number;
     kind: 'play' | 'pause' | 'rewind' | 'forward' | 'mute' | 'unmute' | 'volume' | 'fullscreen' | 'next' | 'info';
@@ -121,8 +137,10 @@ export function TheaterView({
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const embedIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastSavedAtRef = useRef<number>(0);
   const osdTimerRef = useRef<number | null>(null);
+  const shouldAutoPlayOnSwitchRef = useRef<boolean>(false);
 
   const triggerOsd = useCallback(
     (
@@ -188,7 +206,9 @@ export function TheaterView({
     setEpisodeSlug(targetEpSlug);
     setStatusNotice(null);
     setMarkedComplete(false);
+    setAutoPlayCountdown(null);
     setPlayerMode('embed');
+    shouldAutoPlayOnSwitchRef.current = false;
   }, [movie.slug, requestedEpisodeSlug, preferNarration]);
 
   const activeServer = movie.servers[serverIdx] ?? movie.servers[0];
@@ -215,6 +235,24 @@ export function TheaterView({
       Array.from(watchedSet)
     );
   }, [activeServer, activeEpisode, watchedSet]);
+
+  const seriesEpisodes = activeServer?.episodes ?? [];
+  const isSeries = useMemo(
+    () => isSeriesMovie(movie, seriesEpisodes.length),
+    [movie, seriesEpisodes.length]
+  );
+
+  const autoPlayEligibility = useMemo(
+    () =>
+      canAutoPlayNextEpisode({
+        movieType: movie.type,
+        episodes: seriesEpisodes,
+        currentEpisodeSlug: activeEpisode?.slug ?? '',
+        autoPlayEnabled,
+        playerMode,
+      }),
+    [movie.type, seriesEpisodes, activeEpisode?.slug, autoPlayEnabled, playerMode]
+  );
 
   const saveProgress = (progressSec: number, durationSec: number) => {
     if (!activeEpisode || !activeServer) return;
@@ -311,6 +349,22 @@ export function TheaterView({
       }
     };
 
+    const startStreamPlayback = () => {
+      resumeIfMatching();
+      videoEl.muted = isMuted;
+      videoEl.playbackRate = playbackRate;
+      if (shouldAutoPlayOnSwitchRef.current) {
+        shouldAutoPlayOnSwitchRef.current = false;
+        videoEl.play().catch(() => {
+          videoEl.muted = true;
+          setIsMuted(true);
+          videoEl.play().catch(() => {
+            setStatusNotice('Nhấn nút Phát để bắt đầu xem tập tiếp theo.');
+          });
+        });
+      }
+    };
+
     if (Hls.isSupported()) {
       hls = new Hls({
         enableWorker: true,
@@ -319,7 +373,7 @@ export function TheaterView({
       hls.loadSource(proxiedUrl);
       hls.attachMedia(videoEl);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        resumeIfMatching();
+        startStreamPlayback();
       });
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
@@ -329,7 +383,7 @@ export function TheaterView({
       });
     } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
       videoEl.src = proxiedUrl;
-      videoEl.addEventListener('loadedmetadata', resumeIfMatching, { once: true });
+      videoEl.addEventListener('loadedmetadata', startStreamPlayback, { once: true });
     } else {
       setPlayerMode('embed');
     }
@@ -339,7 +393,7 @@ export function TheaterView({
         hls.destroy();
       }
     };
-  }, [activeEpisode?.linkM3u8, playerMode, hlsAvailable]);
+  }, [activeEpisode?.linkM3u8, activeEpisode?.slug, playerMode, hlsAvailable]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -366,17 +420,98 @@ export function TheaterView({
     saveProgress(video.currentTime, Number.isFinite(video.duration) ? video.duration : 0);
   };
 
+  const startAutoPlayCountdown = useCallback(() => {
+    if (!autoPlayEligibility.eligible || !autoPlayEligibility.nextEpisode) {
+      return;
+    }
+    setAutoPlayCountdown({
+      targetEpisode: autoPlayEligibility.nextEpisode,
+      secondsLeft: AUTO_PLAY_COUNTDOWN_SECONDS,
+    });
+  }, [autoPlayEligibility]);
+
+  const handleVideoEnded = useCallback(() => {
+    const video = videoRef.current;
+    if (video) {
+      const dur = Number.isFinite(video.duration) ? video.duration : 0;
+      saveProgress(dur > 0 ? dur : video.currentTime, dur);
+      setMarkedComplete(true);
+    }
+    startAutoPlayCountdown();
+  }, [startAutoPlayCountdown]);
+
   const handleMarkEpisodeComplete = () => {
     saveProgress(2700, 2700);
     setMarkedComplete(true);
   };
 
+  const handleCancelAutoPlayCountdown = useCallback(() => {
+    setAutoPlayCountdown(null);
+  }, []);
+
+  const handlePlayNowFromCountdown = useCallback(() => {
+    if (!autoPlayCountdown) return;
+    const targetEp = autoPlayCountdown.targetEpisode;
+    setAutoPlayCountdown(null);
+    shouldAutoPlayOnSwitchRef.current = true;
+    setEpisodeSlug(targetEp.slug);
+    setStatusNotice(null);
+    setMarkedComplete(false);
+    triggerOsd('next', `Đang phát ${targetEp.name}`);
+  }, [autoPlayCountdown, triggerOsd]);
+
+  const handleToggleAutoPlay = useCallback(() => {
+    setAutoPlayEnabled((prev) => {
+      const next = !prev;
+      saveAutoPlayPreference(next);
+      if (!next) {
+        setAutoPlayCountdown(null);
+      }
+      triggerOsd(
+        next ? 'next' : 'info',
+        next ? 'Bật tự động phát tập tiếp (10s)' : 'Đã tắt tự động phát tập tiếp'
+      );
+      return next;
+    });
+  }, [triggerOsd]);
+
   const handleJumpNextEpisode = useCallback(() => {
     if (!nextEpisodeInfo.nextEpisode) return;
+    setAutoPlayCountdown(null);
+    shouldAutoPlayOnSwitchRef.current = true;
     setEpisodeSlug(nextEpisodeInfo.nextEpisode.slug);
     setStatusNotice(null);
     setMarkedComplete(false);
   }, [nextEpisodeInfo.nextEpisode]);
+
+  // Clear countdown cleanly when switching episode/server/mode or disabling toggle
+  useEffect(() => {
+    setAutoPlayCountdown(null);
+  }, [activeEpisode?.slug, serverIdx, playerMode]);
+
+  // 10-second countdown tick driving automatic transition to next episode
+  useEffect(() => {
+    if (!autoPlayCountdown) return;
+
+    if (autoPlayCountdown.secondsLeft <= 0) {
+      const targetEp = autoPlayCountdown.targetEpisode;
+      setAutoPlayCountdown(null);
+      shouldAutoPlayOnSwitchRef.current = true;
+      setEpisodeSlug(targetEp.slug);
+      setStatusNotice(null);
+      setMarkedComplete(false);
+      triggerOsd('next', `Tự động phát ${targetEp.name}`);
+      return;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setAutoPlayCountdown((prev) =>
+        prev ? { ...prev, secondsLeft: Math.max(0, prev.secondsLeft - 1) } : null
+      );
+    }, 1000);
+
+    return () => window.clearTimeout(timerId);
+  }, [autoPlayCountdown, triggerOsd]);
 
   const handleToggleFullscreen = useCallback(() => {
     const target = stageRef.current;
@@ -578,6 +713,29 @@ export function TheaterView({
     ? `https://www.youtube.com/watch?v=${youtubeEmbedIdMatch[1]}`
     : movie.trailerUrl;
 
+  const embedIframeSrc = useMemo(() => {
+    if (!activeEpisode?.linkEmbed) return '';
+    return appendYoutubeJsApiParams(
+      activeEpisode.linkEmbed,
+      typeof window !== 'undefined' ? window.location.origin : undefined
+    );
+  }, [activeEpisode?.linkEmbed]);
+
+  // Listen for YouTube embed postMessage end events (for grouped AI short series)
+  useEffect(() => {
+    if (playerMode !== 'embed' || !isYoutubeDirectPlayer) return;
+
+    const handleWindowMessage = (event: MessageEvent) => {
+      if (isYoutubeEndedPostMessage(event.data, event.origin)) {
+        setMarkedComplete(true);
+        startAutoPlayCountdown();
+      }
+    };
+
+    window.addEventListener('message', handleWindowMessage);
+    return () => window.removeEventListener('message', handleWindowMessage);
+  }, [playerMode, isYoutubeDirectPlayer, startAutoPlayCountdown]);
+
   const metaLine = [
     String(movie.year),
     movie.quality,
@@ -690,10 +848,16 @@ export function TheaterView({
                   ref={videoRef}
                   controls
                   playsInline
+                  muted={isMuted}
                   poster={movie.thumbUrl || movie.posterUrl}
                   onTimeUpdate={handleTimeUpdate}
+                  onPlay={() => {
+                    if (autoPlayCountdown) {
+                      setAutoPlayCountdown(null);
+                    }
+                  }}
                   onPause={handlePauseOrEnded}
-                  onEnded={handlePauseOrEnded}
+                  onEnded={handleVideoEnded}
                   onVolumeChange={() => {
                     if (videoRef.current) {
                       setIsMuted(videoRef.current.muted || videoRef.current.volume === 0);
@@ -705,9 +869,30 @@ export function TheaterView({
             ) : activeEpisode.linkEmbed ? (
               <div className="relative aspect-video w-full bg-black">
                 <iframe
-                  src={activeEpisode.linkEmbed}
+                  ref={embedIframeRef}
+                  src={embedIframeSrc}
                   title={`${movie.name} - ${activeEpisode.name}`}
                   allow="autoplay; fullscreen; picture-in-picture"
+                  onLoad={() => {
+                    if (isYoutubeDirectPlayer && embedIframeRef.current?.contentWindow) {
+                      try {
+                        embedIframeRef.current.contentWindow.postMessage(
+                          JSON.stringify({ event: 'listening' }),
+                          '*'
+                        );
+                        embedIframeRef.current.contentWindow.postMessage(
+                          JSON.stringify({
+                            event: 'command',
+                            func: 'addEventListener',
+                            args: ['onStateChange'],
+                          }),
+                          '*'
+                        );
+                      } catch {
+                        // Ignore cross-origin frame postMessage failures
+                      }
+                    }
+                  }}
                   className="h-full w-full border-0"
                 />
               </div>
@@ -719,6 +904,76 @@ export function TheaterView({
           ) : (
             <div className="flex aspect-video w-full items-center justify-center text-sm text-zinc-400">
               Phim hiện chưa có tập phát trực tuyến.
+            </div>
+          )}
+
+          {/* Auto-Play Next Episode 10s Countdown Overlay (Series Only) */}
+          {autoPlayCountdown && (
+            <div
+              data-testid="autoplay-next-overlay"
+              role="region"
+              aria-label="Đếm ngược chuyển tập tiếp theo"
+              aria-live="polite"
+              className="animate-osd-pop absolute inset-x-2 bottom-2 z-30 sm:inset-x-auto sm:bottom-14 sm:right-5 sm:w-[360px]"
+            >
+              <div className="overflow-hidden rounded-xl border border-[#D4AF37]/45 bg-[#09090B]/92 text-zinc-100 shadow-2xl shadow-black/80 backdrop-blur-md">
+                <div className="p-2.5 sm:p-4 space-y-2 sm:space-y-3">
+                  <div className="flex items-start justify-between gap-2.5 sm:gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-semibold text-[#F0D075]">
+                        Tập tiếp theo · Tự phát sau{' '}
+                        <span className="font-mono tabular-nums" data-testid="autoplay-seconds-left">
+                          {autoPlayCountdown.secondsLeft}s
+                        </span>
+                      </p>
+                      <h3 className="mt-0.5 truncate text-xs sm:text-sm font-bold text-white">
+                        {autoPlayCountdown.targetEpisode.name}
+                      </h3>
+                      <p className="hidden sm:block truncate text-xs text-zinc-400">{movie.name}</p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleCancelAutoPlayCountdown}
+                      aria-label="Đóng đếm ngược chuyển tập"
+                      className="flex h-7 w-7 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-lg bg-white/10 text-zinc-300 hover:bg-white/20 hover:text-white transition-colors cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handlePlayNowFromCountdown}
+                      className="btn-cinema-gold inline-flex min-h-[36px] sm:min-h-[40px] flex-1 items-center justify-center gap-1.5 rounded-lg px-3 sm:px-3.5 py-1.5 sm:py-2 text-xs font-semibold whitespace-nowrap cursor-pointer"
+                    >
+                      <Play className="h-3.5 w-3.5 fill-current" />
+                      <span>Phát ngay</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCancelAutoPlayCountdown}
+                      className="inline-flex min-h-[36px] sm:min-h-[40px] items-center justify-center rounded-lg border border-white/15 bg-white/10 px-3 sm:px-3.5 py-1.5 sm:py-2 text-xs font-medium text-zinc-200 hover:bg-white/20 whitespace-nowrap transition-colors cursor-pointer"
+                    >
+                      Hủy
+                    </button>
+                  </div>
+                </div>
+
+                {/* Progress bar indicating elapsed 10s countdown */}
+                <div className="h-1 w-full bg-white/10" aria-hidden="true">
+                  <div
+                    className="h-full bg-[#D4AF37] transition-[width] duration-700 ease-linear"
+                    style={{
+                      width: `${computeCountdownProgress(
+                        autoPlayCountdown.secondsLeft,
+                        AUTO_PLAY_COUNTDOWN_SECONDS
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
             </div>
           )}
 
@@ -792,6 +1047,29 @@ export function TheaterView({
                   </button>
                 ))}
               </div>
+            )}
+
+            {isSeries && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoPlayEnabled}
+                aria-label="Tự động phát tập tiếp theo"
+                onClick={handleToggleAutoPlay}
+                title={
+                  autoPlayEnabled
+                    ? 'Đang bật tự động phát tập tiếp theo sau 10 giây khi hết tập'
+                    : 'Đang tắt tự động phát tập tiếp theo'
+                }
+                className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition-colors cursor-pointer ${
+                  autoPlayEnabled
+                    ? 'bg-[#D4AF37] text-[#09090B] font-semibold'
+                    : 'bg-white/10 text-zinc-200 hover:bg-white/20'
+                }`}
+              >
+                <SkipForward className="h-3.5 w-3.5" />
+                <span>Tự chuyển tập: {autoPlayEnabled ? 'Bật' : 'Tắt'}</span>
+              </button>
             )}
 
             {onTogglePip && (
